@@ -1,9 +1,26 @@
 
 import { MODEL_REGISTRY, getModelConfig, saveModelConfig, registerCustomModel, deleteModel, isCustomModel, getVisibleModels } from "./mode/config";
 import type { ModelConfig } from "./mode/config";
-import { IMAGE_HANDLERS, BananaHandler, Flux2Handler } from "./mode/image/configurations";
-import { VIDEO_HANDLERS, Sora2Handler, KlingStandardHandler } from "./mode/video/configurations";
+import { IMAGE_HANDLERS, BananaHandler, BananaProHandler, Flux2Handler, Jimeng45Handler, MJHandler, ZimageHandler, QwenEditHandler, GptImageHandler } from "./mode/image/configurations";
+import { VIDEO_HANDLERS, Sora2Handler, GenericVideoHandler } from "./mode/video/configurations";
 import { constructUrl, fetchThirdParty } from "./mode/network";
+import { getPrimaryModelServiceBinding } from "./modelService";
+
+// 枚举槽 -> 处理器映射。基于 registryKey 的 slot 名称片段路由到对应的 handler，
+// 否则所有枚举图像槽都会落到 Flux2Handler，把图片塞进 /v1/images/generations 的 payload.image
+// 字段，而该端点根本不识别该字段，导致上游图被静默丢弃。
+const resolveImageHandlerForEnumSlot = (registryKey: string): any | null => {
+    if (typeof registryKey !== 'string' || !registryKey.startsWith('枚举/IMAGE/')) return null;
+    const slotName = registryKey.replace('枚举/IMAGE/', '').toLowerCase();
+    if (slotName.includes('nano banana') || slotName.includes('banana')) return BananaProHandler;
+    if (slotName.includes('gpt image') || slotName.includes('gpt-image')) return GptImageHandler;
+    if (slotName.includes('seedream')) return Jimeng45Handler;
+    if (slotName.includes('midjourney') || slotName === 'mj') return MJHandler;
+    if (slotName.includes('zimage') || slotName.includes('z-image')) return ZimageHandler;
+    if (slotName.includes('qwen')) return QwenEditHandler;
+    if (slotName.includes('flux')) return Flux2Handler;
+    return null;
+};
 
 // Re-export for UI
 export { MODEL_REGISTRY, getModelConfig, saveModelConfig, registerCustomModel, deleteModel, isCustomModel, getVisibleModels };
@@ -12,11 +29,16 @@ export type { ModelConfig };
 // --- Generators ---
 
 export const generateCreativeDescription = async (input: string, mode: 'IMAGE' | 'VIDEO'): Promise<string> => {
-  const config = getModelConfig('BananaPro'); 
+  const textBinding = getPrimaryModelServiceBinding('TEXT');
+  const config = textBinding?.registryKey
+      ? getModelConfig(textBinding.registryKey)
+      : textBinding
+      ? { ...getModelConfig('BananaPro'), providerId: textBinding.providerId, modelId: textBinding.modelId }
+      : getModelConfig('BananaPro');
   if (!config.key) return input;
   const prompt = `Optimize this ${mode.toLowerCase()} description for professional AI generation. Input: "${input}". Provide ONLY the optimized prompt text.`;
   try {
-     const payload = { model: 'gemini-2.0-flash-exp', messages: [{ role: 'user', content: prompt }] };
+     const payload = { model: config.modelId || 'gemini-2.0-flash-exp', messages: [{ role: 'user', content: prompt }] };
      const url = constructUrl(config.baseUrl, '/v1/chat/completions');
      const res = await fetchThirdParty(url, 'POST', payload, config);
      return res.choices?.[0]?.message?.content || input;
@@ -35,8 +57,12 @@ export const generateImage = async (
     promptOptimize: boolean = false
 ): Promise<string[]> => {
   let handler = IMAGE_HANDLERS[modelName];
-  
-  // Fallback for custom models
+
+  // 优先级 1：直接匹配旧版固定 key（'BananaPro' / 'Flux2' / ...）
+  // 优先级 2：当传入的是枚举槽 registryKey（如 "枚举/IMAGE/GPT Image 2"），按槽名解析处理器
+  if (!handler) handler = resolveImageHandlerForEnumSlot(modelName);
+
+  // 优先级 3：自定义模型按 registry def.type 兜底
   if (!handler) {
       const def = MODEL_REGISTRY[modelName];
       if (def) {
@@ -44,7 +70,7 @@ export const generateImage = async (
           else handler = Flux2Handler; // Default to Generic Image Gen
       }
   }
-  
+
   if (!handler) handler = IMAGE_HANDLERS['BananaPro'];
 
   const config = getModelConfig(modelName);
@@ -82,11 +108,11 @@ export const generateVideo = async (
         const def = MODEL_REGISTRY[realModelName];
         if (def) {
             if (def.type === 'VIDEO_GEN_CHAT') handler = Sora2Handler;
-            else handler = KlingStandardHandler; // Default to Generic Video Gen
+            else handler = GenericVideoHandler;
         }
     }
 
-    if (!handler) handler = VIDEO_HANDLERS['Sora2'];
+    if (!handler) handler = VIDEO_HANDLERS['Sora 2'];
 
     const config = getModelConfig(realModelName);
     

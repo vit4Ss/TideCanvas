@@ -2,6 +2,7 @@
 import type { ImageModelRules, ModelConfig } from "../types";
 import { generateBananaChatImage, generateBananaEdit } from "./banana";
 import { generateStandardImage, generateMjModal } from "./flux";
+import { generateGptImage } from "./gptImage";
 import { calculateImageSize } from "./rules";
 
 // --- Base Rules ---
@@ -82,6 +83,15 @@ export const QwenEditHandler = {
     }
 };
 
+// 专用 GPT Image 处理器：图生图走 /v1/images/edits multipart（OpenAI 官方），
+// 自动回退到 /v1/chat/completions 多模态（兼容把 gpt-image-* 包成聊天接口的代理）。
+export const GptImageHandler = {
+    rules: { resolutions: ['1k', '2k', '4k'], ratios: BASE_RATIOS },
+    generate: async (cfg: ModelConfig, prompt: string, params: any) => {
+        return await generateGptImage(cfg, prompt, params.aspectRatio, params.resolution, params.inputImages || [], params.count || 1);
+    }
+};
+
 export const IMAGE_HANDLERS: Record<string, any> = {
     'BananaPro': BananaProHandler,
     'Banana Pro Edit': BananaProEditHandler,
@@ -91,5 +101,6 @@ export const IMAGE_HANDLERS: Record<string, any> = {
     '即梦 4': Jimeng4Handler,
     'MJ': MJHandler,
     'Zimage': ZimageHandler,
-    'Qwenedit': QwenEditHandler
+    'Qwenedit': QwenEditHandler,
+    'GPT Image': GptImageHandler
 };

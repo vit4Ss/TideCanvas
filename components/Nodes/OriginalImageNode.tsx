@@ -1,5 +1,5 @@
 import React from 'react';
-import { NodeData } from '../../types';
+import { NodeData, NodeType } from '../../types';
 import { Icons } from '../Icons';
 import { EditableTitle } from './Shared/NodeComponents';
 import { MediaStack } from './Shared/MediaStack';
@@ -19,6 +19,8 @@ export const OriginalImageNode: React.FC<OriginalImageNodeProps> = ({
     data, updateData, onMaximize, onDownload, onDelete, onUpload, isDark = true, selected
 }) => {
     const overlayToolbarBg = isDark ? 'bg-black/50 border-white/5 text-gray-400' : 'bg-white/50 border-black/5 text-gray-600';
+    const isVideoAsset = data.type === NodeType.ORIGINAL_VIDEO || !!data.videoSrc;
+    const emptyLabel = isVideoAsset ? '点击上传视频' : '点击上传图片';
 
     return (
         <>
@@ -37,7 +39,7 @@ export const OriginalImageNode: React.FC<OriginalImageNodeProps> = ({
                       data={data} 
                       updateData={updateData} 
                       currentSrc={data.videoSrc || data.imageSrc} 
-                      type={data.videoSrc ? 'video' : 'image'} 
+                      type={isVideoAsset ? 'video' : 'image'} 
                       onMaximize={onMaximize} 
                       isDark={isDark}
                       selected={selected}
@@ -45,9 +47,13 @@ export const OriginalImageNode: React.FC<OriginalImageNodeProps> = ({
               ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-3">
                       <div className={`w-16 h-16 rounded-full border flex items-center justify-center cursor-pointer transition-all shadow-lg group/icon ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-50 border-gray-200 hover:bg-gray-100'} hover:text-cyan-400 hover:border-cyan-500/50`} onClick={(e) => { e.stopPropagation(); if (onUpload) onUpload(data.id); }}>
-                          <Icons.Upload size={28} className={`transition-colors ${isDark ? 'text-zinc-500 group-hover/icon:text-cyan-400' : 'text-gray-400 group-hover/icon:text-cyan-500'}`}/>
+                          {isVideoAsset ? (
+                              <Icons.Video size={28} className={`transition-colors ${isDark ? 'text-zinc-500 group-hover/icon:text-cyan-400' : 'text-gray-400 group-hover/icon:text-cyan-500'}`}/>
+                          ) : (
+                              <Icons.Upload size={28} className={`transition-colors ${isDark ? 'text-zinc-500 group-hover/icon:text-cyan-400' : 'text-gray-400 group-hover/icon:text-cyan-500'}`}/>
+                          )}
                       </div>
-                      <span className={`text-[11px] font-medium select-none ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>Click icon to Upload</span>
+                      <span className={`text-[11px] font-medium select-none ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{emptyLabel}</span>
                   </div>
               )}
           </div>

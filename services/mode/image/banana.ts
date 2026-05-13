@@ -31,16 +31,21 @@ export const generateBananaChatImage = async (
     console.log(`[BananaPro] Has Input Images: ${hasInputImages}`);
     console.log(`[BananaPro] Needs High Res: ${needsHighRes} (resolution: ${resolution})`);
     
-    // 关键修改：如果需要高分辨率（2K/4K）且当前是 OpenAI 兼容格式，
-    // 自动切换到 Gemini 原生格式，因为 OpenAI 格式不支持 imageSize 参数
+    // 端点选择策略：
+    // - 图生图：除非用户已配置 Gemini 原生端点，否则强制走 /v1/chat/completions。
+    //   原因：/v1/images/generations 不接受多模态 image_url，会静默丢弃上游图。
+    // - 高分辨率纯文生图：切到 Gemini 原生格式以支持 imageSize。
+    // - 其它情况：沿用 config.endpoint。
     let targetUrl: string;
-    if (needsHighRes && (endpointType === 'OPENAI_CHAT' || endpointType === 'UNKNOWN')) {
-        // 构建 Gemini 原生格式的 URL
-        // 格式: {baseUrl}/v1beta/models/{modelId}:generateContent
+    if (hasInputImages && endpointType !== 'GEMINI_NATIVE' && endpointType !== 'OPENAI_CHAT') {
+        targetUrl = constructUrl(config.baseUrl, '/v1/chat/completions');
+        endpointType = 'OPENAI_CHAT';
+        console.log('[BananaPro] Image-to-image: forced endpoint -> /v1/chat/completions for multimodal payload');
+    } else if (needsHighRes && (endpointType === 'OPENAI_CHAT' || endpointType === 'UNKNOWN') && !hasInputImages) {
         const geminiNativeEndpoint = `/v1beta/models/${config.modelId}:generateContent`;
         targetUrl = constructUrl(config.baseUrl, geminiNativeEndpoint);
         endpointType = 'GEMINI_NATIVE';
-        console.log(`[BananaPro] Switched to Gemini Native format for high-res support`);
+        console.log(`[BananaPro] Switched to Gemini Native format for high-res text-to-image`);
         console.log(`[BananaPro] New Endpoint: ${geminiNativeEndpoint}`);
     } else {
         targetUrl = constructUrl(config.baseUrl, config.endpoint);
@@ -61,35 +66,34 @@ export const generateBananaChatImage = async (
         // 构建 parts 数组
         const parts: any[] = [];
         
-        // 如果有输入图片，添加图片作为参考（图生图）
+        // 如果有输入图片，添加所有上游图片作为参考（图生图，支持多图）
         if (hasInputImages) {
-            console.log('[BananaPro] Adding reference image for image-to-image generation');
-            const imgData = inputImages[0];
-            
-            // 检查是否是 base64 格式
-            if (imgData.startsWith('data:')) {
-                const [header, base64Data] = imgData.split(',');
-                const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
-                parts.push({
-                    inlineData: {
-                        mimeType: mimeType,
-                        data: base64Data
-                    }
-                });
-            } else if (imgData.startsWith('http')) {
-                // URL 格式 - Gemini 原生 API 可能不直接支持 URL，需要先下载
-                // 但某些中转站可能支持 fileUri
-                parts.push({
-                    fileData: {
-                        mimeType: 'image/png',
-                        fileUri: imgData
-                    }
-                });
+            console.log(`[BananaPro] Adding ${inputImages.length} reference image(s) for image-to-image generation`);
+            for (const imgData of inputImages) {
+                if (!imgData) continue;
+                if (imgData.startsWith('data:')) {
+                    const [header, base64Data] = imgData.split(',');
+                    const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
+                    parts.push({
+                        inlineData: {
+                            mimeType: mimeType,
+                            data: base64Data
+                        }
+                    });
+                } else if (imgData.startsWith('http')) {
+                    parts.push({
+                        fileData: {
+                            mimeType: 'image/png',
+                            fileUri: imgData
+                        }
+                    });
+                }
             }
             
             // 图生图的提示词
+            const refCountHint = inputImages.length > 1 ? `这 ${inputImages.length} 张参考图片` : '这张参考图片';
             parts.push({ 
-                text: `请根据这张参考图片进行创作。要求：${prompt || '生成一张类似风格的图片'}。输出比例：${aspectRatio}` 
+                text: `请根据${refCountHint}进行创作。要求：${prompt || '生成一张延续主体与风格的图片'}。输出比例：${aspectRatio}` 
             });
         } else {
             // 纯文生图
@@ -141,24 +145,23 @@ export const generateBananaChatImage = async (
         console.log('[BananaPro] Target URL:', targetUrl);
         console.log('[BananaPro] Model ID:', config.modelId);
         console.log(`[BananaPro] Resolution: ${resolution}, ImageSize: ${imageSizeUpperCase}, Size: ${calculatedSize}`);
-        console.log('[BananaPro] Input image preview:', inputImages[0].substring(0, 100) + '...');
+        console.log(`[BananaPro] Reference images: ${inputImages.length}`);
         
-        // 对于 Gemini 3 Pro Image 模型，直接使用 Chat 接口 + 多模态输入
-        // 这是最通用的方式，大多数中转站都支持
-        const img2imgPrompt = `请根据这张参考图片，生成一张新的图片。
+        const refCountHint = inputImages.length > 1 ? `这 ${inputImages.length} 张参考图片` : '这张参考图片';
+        const img2imgPrompt = `请根据${refCountHint}，生成一张新的图片。
 
 要求：
 - 以参考图片为基础进行创作
-- 保持参考图片的主要风格和元素
+- 保持参考图片的主要主体和风格
 - 根据以下描述进行修改或扩展：${prompt || '保持原图风格生成类似图片'}
 - 输出比例：${aspectRatio}
 - 输出分辨率：${imageSizeUpperCase} (${calculatedSize})`;
         
-        // 构建多模态消息内容 - 先文字后图片（某些API需要这个顺序）
-        const content: any[] = [
-            { type: 'text', text: img2imgPrompt },
-            { type: 'image_url', image_url: { url: inputImages[0] } }
-        ];
+        // 构建多模态消息内容：先文字（任务指令），后逐张引用图片
+        const content: any[] = [{ type: 'text', text: img2imgPrompt }];
+        for (const imgUrl of inputImages) {
+            if (imgUrl) content.push({ type: 'image_url', image_url: { url: imgUrl } });
+        }
         
         const payload: any = {
             model: config.modelId,
@@ -185,7 +188,8 @@ export const generateBananaChatImage = async (
             messageContentTypes: content.map(c => c.type),
             hasResponseFormat: !!payload.response_format,
             imageSize: imageSizeUpperCase,
-            aspectRatio: aspectRatio
+            aspectRatio: aspectRatio,
+            inputImagesCount: inputImages.length
         });
         
         try {

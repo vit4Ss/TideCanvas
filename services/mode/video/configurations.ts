@@ -228,7 +228,25 @@ export const Grok3Handler = {
     }
 };
 
+export const GenericVideoHandler = {
+    rules: { resolutions: RESOLUTIONS_STD, durations: DURATIONS_STD, ratios: EXTENDED_RATIOS, maxInputImages: 2 },
+    generate: async (cfg: ModelConfig, prompt: string, params: any) => {
+        return await generateGenericVideo(
+            cfg,
+            { id: cfg.modelId, name: cfg.modelId, type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: cfg.endpoint },
+            cfg.modelId,
+            prompt,
+            params.aspectRatio,
+            params.resolution,
+            params.duration,
+            params.inputImages || [],
+            params.isStartEndMode
+        );
+    }
+};
+
 export const VIDEO_HANDLERS: Record<string, any> = {
+    '__GENERIC__': GenericVideoHandler,
     'Sora 2': Sora2Handler,
     'Veo 3.1 Fast': VeoFastHandler,
     'Veo 3.1 Pro': VeoProHandler,

@@ -4,13 +4,17 @@
  */
 
 const DB_NAME = 'canvas_storage_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_HANDLES = 'handles';
 const STORE_SETTINGS = 'settings';
 const STORE_CACHE = 'cache';
+const STORE_WORKSPACE_META = 'workspaces_meta';
+const STORE_WORKSPACE_DATA = 'workspaces_data';
 
 const KEY_DIR_HANDLE = 'download_dir_handle';
 const KEY_SETTINGS = 'app_settings';
+
+const normalizeWorkspaceName = (name: string) => name.trim().toLocaleLowerCase();
 
 // 默认设置
 const DEFAULT_SETTINGS: AppSettings = {
@@ -50,6 +54,36 @@ export interface StorageStats {
     oldestCacheTime: number | null;
 }
 
+// 画布工作区
+export interface WorkspaceMeta {
+    id: string;
+    name: string;
+    createdAt: number;
+    updatedAt: number;
+    nodeCount: number;
+    connectionCount: number;
+    thumbnail?: string;
+}
+
+export interface WorkspaceData {
+    id: string;
+    projectName: string;
+    nodes: any[];
+    connections: any[];
+    transform: any;
+}
+
+export interface WorkspaceSaveInput {
+    id: string;
+    name: string;
+    projectName: string;
+    nodes: any[];
+    connections: any[];
+    transform: any;
+    thumbnail?: string;
+    createdAt?: number;
+}
+
 // TypeScript interfaces for File System Access API
 interface FileSystemHandle {
     kind: 'file' | 'directory';
@@ -86,6 +120,7 @@ declare global {
             getDefaultDownloadPath(): Promise<string>;
             saveFile(path: string, data: ArrayBuffer): Promise<boolean>;
             selectDirectory(): Promise<string | null>;
+            requestUrl(payload: any): Promise<{ ok: boolean; status: number; statusText: string; text: string }>;
         };
     }
 }
@@ -121,6 +156,13 @@ class StorageService {
                     const cacheStore = db.createObjectStore(STORE_CACHE, { keyPath: 'key' });
                     cacheStore.createIndex('timestamp', 'timestamp', { unique: false });
                     cacheStore.createIndex('type', 'type', { unique: false });
+                }
+                if (!db.objectStoreNames.contains(STORE_WORKSPACE_META)) {
+                    const metaStore = db.createObjectStore(STORE_WORKSPACE_META, { keyPath: 'id' });
+                    metaStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+                }
+                if (!db.objectStoreNames.contains(STORE_WORKSPACE_DATA)) {
+                    db.createObjectStore(STORE_WORKSPACE_DATA, { keyPath: 'id' });
                 }
             };
         });
@@ -514,6 +556,164 @@ class StorageService {
 
     isFileSystemAccessSupported(): boolean {
         return 'showDirectoryPicker' in window;
+    }
+
+    // ================== 画布工作区管理 ==================
+
+    async listWorkspaces(): Promise<WorkspaceMeta[]> {
+        try {
+            const store = await this.getStore(STORE_WORKSPACE_META, 'readonly');
+            return new Promise((resolve) => {
+                const request = store.getAll();
+                request.onsuccess = () => {
+                    const list = (request.result || []) as WorkspaceMeta[];
+                    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+                    resolve(list);
+                };
+                request.onerror = () => resolve([]);
+            });
+        } catch (e) {
+            console.error('Failed to list workspaces:', e);
+            return [];
+        }
+    }
+
+    async getWorkspaceMeta(id: string): Promise<WorkspaceMeta | null> {
+        try {
+            const store = await this.getStore(STORE_WORKSPACE_META, 'readonly');
+            return new Promise((resolve) => {
+                const request = store.get(id);
+                request.onsuccess = () => resolve((request.result as WorkspaceMeta) || null);
+                request.onerror = () => resolve(null);
+            });
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async loadWorkspace(id: string): Promise<{ meta: WorkspaceMeta; data: WorkspaceData } | null> {
+        try {
+            const meta = await this.getWorkspaceMeta(id);
+            if (!meta) return null;
+            // 注意：不要把 getStore 放进 Promise.all 与 meta 一起 await，
+            // 该事务会在事件循环空转时自动关闭，再 get 会抛 TransactionInactiveError。
+            const dataStore = await this.getStore(STORE_WORKSPACE_DATA, 'readonly');
+            const data = await new Promise<WorkspaceData | null>((resolve, reject) => {
+                try {
+                    const request = dataStore.get(id);
+                    request.onsuccess = () => resolve((request.result as WorkspaceData) || null);
+                    request.onerror = () => reject(request.error || new Error('IndexedDB get failed'));
+                } catch (err) {
+                    reject(err);
+                }
+            });
+            if (!data) {
+                console.warn('Workspace data missing, opening as empty workspace:', id);
+                return {
+                    meta,
+                    data: {
+                        id,
+                        projectName: meta.name || '未命名画布',
+                        nodes: [],
+                        connections: [],
+                        transform: { x: 0, y: 0, k: 0.75 },
+                    },
+                };
+            }
+            return { meta, data };
+        } catch (e) {
+            console.error('Failed to load workspace:', e);
+            throw e instanceof Error ? e : new Error(String(e));
+        }
+    }
+
+    async saveWorkspace(input: WorkspaceSaveInput): Promise<WorkspaceMeta> {
+        const now = Date.now();
+        const existing = await this.getWorkspaceMeta(input.id);
+        const meta: WorkspaceMeta = {
+            id: input.id,
+            name: input.name || input.projectName || '未命名画布',
+            createdAt: existing?.createdAt || input.createdAt || now,
+            updatedAt: now,
+            nodeCount: input.nodes?.length || 0,
+            connectionCount: input.connections?.length || 0,
+            thumbnail: input.thumbnail || existing?.thumbnail,
+        };
+        const data: WorkspaceData = {
+            id: input.id,
+            projectName: input.projectName,
+            nodes: input.nodes || [],
+            connections: input.connections || [],
+            transform: input.transform || { x: 0, y: 0, k: 1 },
+        };
+
+        const db = await this.dbPromise;
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction([STORE_WORKSPACE_META, STORE_WORKSPACE_DATA], 'readwrite');
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+            tx.objectStore(STORE_WORKSPACE_META).put(meta);
+            tx.objectStore(STORE_WORKSPACE_DATA).put(data);
+        });
+        return meta;
+    }
+
+    async deleteWorkspace(id: string): Promise<void> {
+        try {
+            const db = await this.dbPromise;
+            await new Promise<void>((resolve, reject) => {
+                const tx = db.transaction([STORE_WORKSPACE_META, STORE_WORKSPACE_DATA], 'readwrite');
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error);
+                tx.objectStore(STORE_WORKSPACE_META).delete(id);
+                tx.objectStore(STORE_WORKSPACE_DATA).delete(id);
+            });
+        } catch (e) {
+            console.error('Failed to delete workspace:', e);
+        }
+    }
+
+    async renameWorkspace(id: string, name: string): Promise<WorkspaceMeta | null> {
+        const existing = await this.getWorkspaceMeta(id);
+        if (!existing) return null;
+        const nextName = name.trim() || existing.name;
+        const isDuplicate = (await this.listWorkspaces()).some(
+            item => item.id !== id && normalizeWorkspaceName(item.name) === normalizeWorkspaceName(nextName)
+        );
+        if (isDuplicate) {
+            throw new Error('已存在同名画布，请换一个名称');
+        }
+        const updated: WorkspaceMeta = {
+            ...existing,
+            name: nextName,
+            updatedAt: Date.now(),
+        };
+        try {
+            const db = await this.dbPromise;
+            await new Promise<void>((resolve, reject) => {
+                const tx = db.transaction([STORE_WORKSPACE_META, STORE_WORKSPACE_DATA], 'readwrite');
+                const dataStore = tx.objectStore(STORE_WORKSPACE_DATA);
+                const dataRequest = dataStore.get(id);
+
+                dataRequest.onsuccess = () => {
+                    const existingData = dataRequest.result as WorkspaceData | undefined;
+                    if (existingData) {
+                        dataStore.put({ ...existingData, projectName: nextName });
+                    }
+                    tx.objectStore(STORE_WORKSPACE_META).put(updated);
+                };
+                dataRequest.onerror = () => reject(dataRequest.error);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error);
+            });
+            return updated;
+        } catch (e) {
+            console.error('Failed to rename workspace:', e);
+            return null;
+        }
     }
 }
 

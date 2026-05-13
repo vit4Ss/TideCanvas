@@ -30,6 +30,20 @@ export const generateStandardImage = async (
    const isQwen = modelDef.id.includes('qwen');
    const hasInputImage = inputImages.length > 0;
 
+   // 多图友好的字段写入器：覆盖各家代理的常见字段名（单张 + 数组）。
+   // 任意一个被忽略不影响其他字段被识别。
+   const applyImgFields = (payload: any, urls: string[]) => {
+       const primary = urls[0];
+       payload.image = primary;
+       payload.image_url = primary;
+       payload.images = [...urls];
+       payload.image_urls = [...urls];
+       payload.init_image = primary;
+       payload.reference_image = primary;
+       payload.ref_image = primary;
+       payload.input_image = primary;
+   };
+
    if ((isFlux || isZimage) && n > 1) {
       const promises = Array(n).fill(null).map(async () => {
          const payload: any = {
@@ -40,16 +54,16 @@ export const generateStandardImage = async (
          };
          if (isFlux) {
              if (resolution !== '1k') payload.quality = 'hd';
-             // Flux image-to-image support
-             if (hasInputImage) {
-                 payload.image = inputImages[0];
-                 payload.image_url = inputImages[0];
-             }
+             if (hasInputImage) applyImgFields(payload, inputImages);
          } else if (isZimage) {
              payload.response_format = "b64_json";
              payload.watermark = false;
              payload.prompt_extend = !!promptOptimize;
-             if (hasInputImage) payload.image = extractBase64(inputImages[0]);
+             if (hasInputImage) {
+                 // Zimage 通常需要纯 base64 数据
+                 const base64s = inputImages.map(extractBase64);
+                 applyImgFields(payload, base64s);
+             }
          }
          const res = await fetchThirdParty(targetUrl, 'POST', payload, config, { timeout: 200000 });
          const data = (res.data && Array.isArray(res.data)) ? res.data : (res.data ? [res.data] : [res]);
@@ -72,11 +86,7 @@ export const generateStandardImage = async (
        payload.size = calculatedSize;
        if (resolution !== '1k') payload.quality = 'hd';
        delete payload.response_format; 
-       // Flux image-to-image support
-       if (hasInputImage) {
-           payload.image = inputImages[0];
-           payload.image_url = inputImages[0];
-       }
+       if (hasInputImage) applyImgFields(payload, inputImages);
    } else {
        payload.size = calculatedSize;
    }
@@ -84,23 +94,20 @@ export const generateStandardImage = async (
    if (isZimage) {
        payload.watermark = false;
        payload.prompt_extend = !!promptOptimize;
-       if (hasInputImage) payload.image = extractBase64(inputImages[0]);
+       if (hasInputImage) {
+           const base64s = inputImages.map(extractBase64);
+           applyImgFields(payload, base64s);
+       }
    }
 
-   // Jimeng (即梦) image-to-image support
+   // Jimeng (即梦) / Doubao Seedream 图生图
    if ((isJimeng || isDoubao) && hasInputImage) {
-       payload.image = inputImages[0];
-       payload.image_url = inputImages[0];
-       // Some APIs use these alternative field names
-       payload.init_image = inputImages[0];
-       payload.reference_image = inputImages[0];
+       applyImgFields(payload, inputImages);
    }
 
-   // Qwen image-to-image support
+   // Qwen 图生图
    if (isQwen && hasInputImage) {
-       payload.image = inputImages[0];
-       payload.image_url = inputImages[0];
-       payload.ref_image = inputImages[0];
+       applyImgFields(payload, inputImages);
    }
 
    const res = await fetchThirdParty(targetUrl, 'POST', payload, config, { timeout: 200000 });

@@ -2,7 +2,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { NodeData } from '../../types';
 import { Icons } from '../Icons';
-import { getModelConfig, MODEL_REGISTRY, getVisibleModels } from '../../services/geminiService';
+import { getModelConfig } from '../../services/geminiService';
+import { getCanvasModelOptions, CanvasModelOption } from '../../services/modelService';
 import { VIDEO_HANDLERS } from '../../services/mode/video/configurations';
 import { getVideoConstraints, getAutoCorrectedVideoSettings } from '../../services/mode/video/rules';
 import { LocalEditableTitle, LocalCustomDropdown, LocalMediaStack } from './Shared/LocalNodeComponents';
@@ -26,7 +27,7 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [progress, setProgress] = useState(0);
     const [isConfigured, setIsConfigured] = useState(true);
-    const [videoModels, setVideoModels] = useState<string[]>([]);
+    const [videoModels, setVideoModels] = useState<CanvasModelOption[]>([]);
 
     const isSelectedAndStable = selected && !isSelecting;
     
@@ -39,47 +40,57 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
     const hasValidInputs = hasStartFrame && hasEndFrame;
 
     const checkConfig = useCallback(() => {
-         const mName = data.model || 'Sora 2';
-         const cfg = getModelConfig(mName);
+         if (!data.model) {
+             setIsConfigured(false);
+             return;
+         }
+         const cfg = getModelConfig(data.model);
          setIsConfigured(!!cfg.key);
     }, [data.model]);
 
     const updateModels = useCallback(() => {
-        const visibleModels = getVisibleModels();
-        const models = visibleModels.filter(k => MODEL_REGISTRY[k]?.category === 'VIDEO');
+        const models = getCanvasModelOptions('VIDEO');
         setVideoModels(models);
-    }, []);
+        if (models.length > 0 && !models.some(item => item.value === data.model)) {
+            updateData(data.id, { model: models[0].value });
+        } else if (models.length === 0 && data.model) {
+            updateData(data.id, { model: '' });
+        }
+    }, [data.id, data.model, updateData]);
 
     useEffect(() => { 
         checkConfig(); 
         updateModels();
         window.addEventListener('modelConfigUpdated', checkConfig); 
         window.addEventListener('modelRegistryUpdated', updateModels);
+        window.addEventListener('modelServiceUpdated', updateModels);
         return () => {
             window.removeEventListener('modelConfigUpdated', checkConfig);
             window.removeEventListener('modelRegistryUpdated', updateModels);
+            window.removeEventListener('modelServiceUpdated', updateModels);
         };
     }, [checkConfig, updateModels]);
 
     // Group models for dropdown
     const groupedVideoModels = useMemo(() => {
-        const groups: Record<string, string[]> = {
+        const groups: Record<string, CanvasModelOption[]> = {
             'Kling': [],
             'Hailuo': [],
             'Veo': [],
             'Wan': []
         };
-        const ungrouped: string[] = [];
+        const ungrouped: CanvasModelOption[] = [];
         
         videoModels.forEach(m => {
-            const lower = m.toLowerCase();
-            if (m.startsWith('Kling') || m.includes('可灵')) {
+            const label = m.label || m.value;
+            const lower = label.toLowerCase();
+            if (label.startsWith('Kling') || label.includes('可灵')) {
                  groups['Kling'].push(m);
-            } else if (m.startsWith('海螺') || lower.includes('hailuo')) {
+            } else if (label.startsWith('海螺') || lower.includes('hailuo')) {
                  groups['Hailuo'].push(m);
-            } else if (m.startsWith('Veo')) {
+            } else if (label.startsWith('Veo')) {
                  groups['Veo'].push(m);
-            } else if (m.startsWith('Wan') || lower.includes('wan')) {
+            } else if (label.startsWith('Wan') || lower.includes('wan')) {
                  groups['Wan'].push(m);
             } else {
                  ungrouped.push(m);
@@ -116,7 +127,7 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
     };
 
     const currentModel = data.model || 'Sora 2';
-    const handler = VIDEO_HANDLERS[currentModel] || VIDEO_HANDLERS['Sora 2'];
+    const handler = VIDEO_HANDLERS[currentModel] || VIDEO_HANDLERS['__GENERIC__'] || VIDEO_HANDLERS['Sora 2'];
     const rules = handler.rules;
 
     const resOptions = rules.resolutions || ['720p'];
@@ -310,7 +321,7 @@ export const StartEndToVideoNode: React.FC<StartEndToVideoNodeProps> = ({
                   <div className="flex items-center gap-2">
                        <LocalCustomDropdown 
                            options={groupedVideoModels} 
-                           value={data.model || 'Sora 2'} 
+                           value={data.model || '未选择模型'} 
                            onChange={(val: any) => updateData(data.id, { model: val })} 
                            isOpen={activeDropdown === 'model'} 
                            onToggle={() => setActiveDropdown(activeDropdown === 'model' ? null : 'model')} 

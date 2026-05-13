@@ -1,18 +1,21 @@
 import React, { useState, useRef, useEffect, memo, useMemo } from 'react';
 import { Icons } from './Icons';
-import { NodeType, NodeData } from '../types';
+import { NodeData } from '../types';
 
 interface SidebarProps {
-  onAddNode: (type: NodeType) => void;
-  onNewWorkflow: () => void;
+  onClearCanvas: () => void;
   onImportAsset: () => void;
   onOpenExportImport: () => void;
   nodes: NodeData[];
   onPreviewMedia: (url: string, type: 'image' | 'video') => void;
   isDark?: boolean;
+  // Top-right toolbar actions migrated to sidebar
+  onToggleTheme: () => void;
+  onOpenSettings: () => void;
+  onOpenCanvasManager: () => void;
 }
 
-type ActivePanel = 'ADD' | 'HISTORY' | 'PROJECT' | null;
+type ActivePanel = 'HISTORY' | null;
 
 const HistoryItem = memo(({ node, type, onClick, isDark }: { node: NodeData, type: 'image' | 'video', onClick: () => void, isDark: boolean }) => {
     const stackCount = node.outputArtifacts?.length || 0;
@@ -58,13 +61,15 @@ const HistoryItem = memo(({ node, type, onClick, isDark }: { node: NodeData, typ
 });
 
 const Sidebar: React.FC<SidebarProps> = ({ 
-  onAddNode, 
-  onNewWorkflow,
+  onClearCanvas,
   onImportAsset,
   onOpenExportImport,
   nodes,
   onPreviewMedia,
-  isDark = true
+  isDark = true,
+  onToggleTheme,
+  onOpenSettings,
+  onOpenCanvasManager,
 }) => {
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [historyTab, setHistoryTab] = useState<'image' | 'video'>('image');
@@ -110,31 +115,36 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   // 样式
-  const bgMain = isDark ? 'bg-[#18181b]/95' : 'bg-white/95';
-  const borderColor = isDark ? 'border-zinc-800' : 'border-gray-200';
+  const bgMain = isDark ? 'bg-zinc-950/90' : 'bg-white/90';
+  const borderColor = isDark ? 'border-white/10' : 'border-gray-200/70';
   const textMain = isDark ? 'text-white' : 'text-gray-900';
   const textSub = isDark ? 'text-gray-400' : 'text-gray-500';
-  const textMuted = isDark ? 'text-gray-600' : 'text-gray-400';
-  const hoverBg = isDark ? 'hover:bg-white/5' : 'hover:bg-gray-100';
-  const activeBg = isDark ? 'bg-blue-500/10 text-blue-400' : 'bg-blue-50 text-blue-600';
+  const textMuted = isDark ? 'text-gray-500' : 'text-gray-400';
+  const hoverBg = isDark ? 'hover:bg-white/10' : 'hover:bg-slate-100';
+  const activeBg = isDark ? 'bg-blue-500 text-white shadow-lg shadow-blue-950/30' : 'bg-blue-500 text-white shadow-lg shadow-blue-500/25';
 
   // 侧边栏按钮
   const SidebarButton = ({ 
     icon: Icon, 
     panel, 
     tooltip,
-    onClick
+    onClick,
+    active,
+    disabled,
   }: { 
     icon: any, 
     panel?: ActivePanel, 
     tooltip: string,
-    onClick?: () => void
+    onClick?: () => void,
+    active?: boolean,
+    disabled?: boolean,
   }) => {
-    const isActive = panel && activePanel === panel;
+    const isActive = active || (panel && activePanel === panel);
     
     return (
       <button 
-        className={`relative w-11 h-11 flex items-center justify-center rounded-xl transition-all duration-200 group ${
+        disabled={disabled}
+        className={`relative w-11 h-11 flex items-center justify-center rounded-2xl transition-all duration-200 group disabled:opacity-40 disabled:cursor-not-allowed hover:-translate-y-0.5 ${
           isActive ? activeBg : `${textSub} ${hoverBg}`
         }`}
         onClick={() => {
@@ -145,91 +155,20 @@ const Sidebar: React.FC<SidebarProps> = ({
           }
         }}
       >
-        <Icon size={20} />
-        <div className={`absolute left-full ml-3 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap opacity-0 group-hover:opacity-100 transition-all pointer-events-none z-50 ${
-          isDark ? 'bg-zinc-900 text-white border border-zinc-700' : 'bg-white text-gray-900 border border-gray-200 shadow-lg'
+        {isActive && (
+          <span className={`absolute -left-2 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full ${
+            isDark ? 'bg-blue-400' : 'bg-blue-500'
+          }`} />
+        )}
+        <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
+        <div className={`absolute left-full ml-3 px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap opacity-0 translate-x-1 group-hover:translate-x-0 group-hover:opacity-100 transition-all pointer-events-none z-50 ${
+          isDark ? 'bg-zinc-950 text-white border border-white/10 shadow-xl shadow-black/30' : 'bg-white text-gray-900 border border-gray-200 shadow-xl shadow-gray-200/70'
         }`}>
           {tooltip}
         </div>
       </button>
     );
   };
-
-  // 渲染添加节点面板
-  const renderAddPanel = () => {
-    const NodeButton = ({ icon: Icon, label, description, type, color }: { icon: any, label: string, description: string, type: NodeType, color: string }) => (
-      <button
-        onClick={() => { onAddNode(type); setActivePanel(null); }}
-        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all group ${
-          isDark 
-            ? 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50' 
-            : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50'
-        }`}
-      >
-        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${color}`}>
-          <Icon size={20} />
-        </div>
-        <div className="flex-1 text-left">
-          <div className={`text-sm font-semibold ${textMain}`}>{label}</div>
-          <div className={`text-[11px] ${textMuted}`}>{description}</div>
-        </div>
-        <Icons.ChevronRight size={16} className={`${textMuted} group-hover:translate-x-0.5 transition-transform`} />
-      </button>
-    );
-
-    return (
-      <div className="space-y-2">
-        <div className={`text-[10px] font-bold uppercase tracking-wider ${textMuted}`}>生成节点</div>
-        <div className="space-y-2">
-          <NodeButton 
-            icon={Icons.Image} 
-            label="生图" 
-            description="文本/图片生成图片"
-            type={NodeType.TEXT_TO_IMAGE} 
-            color={isDark ? 'bg-cyan-500/15 text-cyan-400' : 'bg-cyan-100 text-cyan-600'} 
-          />
-          <NodeButton 
-            icon={Icons.Video} 
-            label="生视频" 
-            description="文本/图片生成视频"
-            type={NodeType.TEXT_TO_VIDEO} 
-            color={isDark ? 'bg-purple-500/15 text-purple-400' : 'bg-purple-100 text-purple-600'} 
-          />
-        </div>
-      </div>
-    );
-  };
-
-  // 渲染项目面板
-  const renderProjectPanel = () => (
-    <div className="space-y-2">
-      <button
-        onClick={() => { onNewWorkflow(); setActivePanel(null); }}
-        className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${hoverBg}`}
-      >
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${isDark ? 'bg-blue-500/10 text-blue-400' : 'bg-blue-50 text-blue-600'}`}>
-          <Icons.FilePlus size={18} />
-        </div>
-        <div className="text-left">
-          <div className={`text-sm font-medium ${textMain}`}>新建项目</div>
-          <div className={`text-[11px] ${textMuted}`}>创建空白画布</div>
-        </div>
-      </button>
-      
-      <button
-        onClick={() => { onOpenExportImport(); setActivePanel(null); }}
-        className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${hoverBg}`}
-      >
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${isDark ? 'bg-emerald-500/10 text-emerald-400' : 'bg-emerald-50 text-emerald-600'}`}>
-          <Icons.FolderOpen size={18} />
-        </div>
-        <div className="text-left">
-          <div className={`text-sm font-medium ${textMain}`}>导出 / 导入</div>
-          <div className={`text-[11px] ${textMuted}`}>项目文件管理</div>
-        </div>
-      </button>
-    </div>
-  );
 
   // 渲染面板内容
   const renderPanel = () => {
@@ -240,19 +179,22 @@ const Sidebar: React.FC<SidebarProps> = ({
       return (
         <div 
           ref={panelRef}
-          className={`fixed left-[76px] top-4 bottom-4 w-80 ${bgMain} backdrop-blur-xl border ${borderColor} rounded-2xl z-[190] flex flex-col shadow-2xl animate-in slide-in-from-left-2 duration-200`}
+          className={`fixed left-[92px] top-4 bottom-4 w-80 ${bgMain} backdrop-blur-2xl border ${borderColor} rounded-[26px] z-[190] flex flex-col shadow-2xl shadow-black/10 animate-in slide-in-from-left-2 fade-in duration-200 overflow-hidden`}
         >
           {/* Header */}
-          <div className={`px-5 py-4 border-b ${borderColor} flex items-center justify-between shrink-0`}>
+          <div className={`px-5 py-4 border-b ${borderColor} flex items-center justify-between shrink-0 ${isDark ? 'bg-white/[0.02]' : 'bg-slate-50/70'}`}>
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-lg ${isDark ? 'bg-blue-500/10' : 'bg-blue-50'}`}>
+              <div className={`p-2.5 rounded-2xl ${isDark ? 'bg-blue-500/15' : 'bg-blue-50'}`}>
                 <Icons.Clock size={18} className={isDark ? 'text-blue-400' : 'text-blue-600'} />
               </div>
-              <h3 className={`text-base font-bold ${textMain}`}>生成历史</h3>
+              <div>
+                <h3 className={`text-base font-bold ${textMain}`}>生成历史</h3>
+                <p className={`text-xs ${textMuted}`}>查看已生成的媒体</p>
+              </div>
             </div>
             <button 
               onClick={() => setActivePanel(null)}
-              className={`p-2 rounded-lg ${hoverBg} ${textSub}`}
+              className={`p-2 rounded-xl ${hoverBg} ${textSub}`}
             >
               <Icons.X size={18} />
             </button>
@@ -325,43 +267,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       );
     }
 
-    // 其他面板 - 紧凑型
-    let title = '';
-    let content = null;
-
-    switch (activePanel) {
-      case 'ADD':
-        title = '添加节点';
-        content = renderAddPanel();
-        break;
-      case 'PROJECT':
-        title = '项目';
-        content = renderProjectPanel();
-        break;
-    }
-
-    return (
-      <div 
-        ref={panelRef}
-        className={`fixed left-[76px] top-1/2 -translate-y-1/2 w-64 max-h-[80vh] ${bgMain} backdrop-blur-xl border ${borderColor} rounded-2xl z-[190] flex flex-col shadow-xl animate-in slide-in-from-left-2 duration-200`}
-      >
-        {/* Panel Header */}
-        <div className={`px-4 py-3 border-b ${borderColor} flex items-center justify-between shrink-0`}>
-          <h3 className={`text-sm font-bold ${textMain}`}>{title}</h3>
-          <button 
-            onClick={() => setActivePanel(null)}
-            className={`p-1.5 rounded-lg ${hoverBg} ${textSub}`}
-          >
-            <Icons.X size={16} />
-          </button>
-        </div>
-        
-        {/* Panel Content */}
-        <div className="flex-1 p-4 overflow-hidden">
-          {content}
-        </div>
-      </div>
-    );
+    return null;
   };
 
   return (
@@ -369,18 +275,19 @@ const Sidebar: React.FC<SidebarProps> = ({
       {/* Sidebar */}
       <div 
         ref={sidebarRef}
-        className={`fixed left-4 top-1/2 -translate-y-1/2 z-[200] ${bgMain} backdrop-blur-xl border ${borderColor} rounded-2xl p-2 flex flex-col items-center gap-1 shadow-xl`}
+        className={`fixed left-5 top-1/2 -translate-y-1/2 z-[200] ${bgMain} backdrop-blur-2xl border ${borderColor} rounded-[26px] p-2.5 flex flex-col items-center gap-1.5 shadow-2xl shadow-black/10`}
       >
-        <SidebarButton icon={Icons.LayoutGrid} panel="ADD" tooltip="添加节点" />
-        
-        <div className={`w-8 h-px my-1 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
-        
         <SidebarButton icon={Icons.Clock} panel="HISTORY" tooltip="生成历史" />
         <SidebarButton icon={Icons.Upload} tooltip="导入素材" onClick={onImportAsset} />
-        
+
         <div className={`w-8 h-px my-1 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
-        
-        <SidebarButton icon={Icons.Folder} panel="PROJECT" tooltip="项目" />
+
+        {/* Top-right toolbar actions migrated here */}
+        <SidebarButton icon={Icons.Folder} tooltip="项目" onClick={onOpenCanvasManager} />
+        <SidebarButton icon={Icons.Download} tooltip="下载" onClick={onOpenExportImport} />
+        <SidebarButton icon={isDark ? Icons.Sun : Icons.Moon} tooltip={isDark ? '切换为亮色' : '切换为暗色'} onClick={onToggleTheme} />
+        <SidebarButton icon={Icons.Trash2} tooltip="清空当前画布" onClick={onClearCanvas} />
+        <SidebarButton icon={Icons.Settings} tooltip="设置" onClick={onOpenSettings} />
       </div>
 
       {/* Panel */}

@@ -5,12 +5,16 @@ import type { ModelConfig } from "./types";
 const isDev = typeof window !== 'undefined' && 
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-// 使用 CORS 代理包装 URL（仅开发环境）
+const isElectron = typeof window !== 'undefined' && !!window.electronAPI?.requestUrl;
+
+// 使用 CORS 代理包装 URL（仅 Web 开发环境，Electron 主进程直发可跳过）
 const wrapWithCorsProxy = (targetUrl: string): string => {
     if (!isDev) return targetUrl;
+    // Electron 走主进程 requestUrl，不存在 CORS，不能拼相对路径，否则主进程无法解析
+    if (isElectron) return targetUrl;
     // 如果已经是相对路径或者是本地地址，不需要代理
-    if (targetUrl.startsWith('/') || 
-        targetUrl.includes('localhost') || 
+    if (targetUrl.startsWith('/') ||
+        targetUrl.includes('localhost') ||
         targetUrl.includes('127.0.0.1')) {
         return targetUrl;
     }
@@ -26,6 +30,26 @@ export const constructUrl = (baseUrl: string, endpointPath: string) => {
     }
     if (!base) return `/${path}`;
     return `${base}/${path}`;
+};
+
+const serializeFormData = async (formData: FormData) => {
+    const entries: any[] = [];
+
+    for (const [key, value] of formData.entries()) {
+        if (value instanceof File) {
+            entries.push({
+                key,
+                kind: 'file',
+                name: value.name,
+                type: value.type,
+                data: Array.from(new Uint8Array(await value.arrayBuffer()))
+            });
+        } else {
+            entries.push({ key, kind: 'field', value });
+        }
+    }
+
+    return { entries };
 };
 
 export const fetchThirdParty = async (url: string, method: string, body: any, config: ModelConfig, options: { timeout?: number, retries?: number, isFormData?: boolean } = {}) => {
@@ -123,11 +147,21 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
       }
 
       try {
-          const response = await fetch(url, fetchOptions);
+          const response = isElectron
+              ? await window.electronAPI!.requestUrl({
+                  url,
+                  method,
+                  headers,
+                  timeout,
+                  isFormData,
+                  body: isFormData && body instanceof FormData ? await serializeFormData(body) : fetchOptions.body
+              })
+              : await fetch(url, fetchOptions);
+          const responseText = typeof response.text === 'function' ? await response.text() : response.text;
           clearTimeout(timeoutId);
 
           if (!response.ok) {
-            const errText = await response.text();
+            const errText = responseText;
             let errMsg = errText;
             try {
                 const jsonErr = JSON.parse(errText);
@@ -146,7 +180,7 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
             throw error;
           }
 
-          const text = await response.text();
+          const text = responseText;
           try {
               if (!text) return {}; 
               return JSON.parse(text);

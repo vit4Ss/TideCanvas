@@ -2,6 +2,7 @@
 export type StrategyType = 
   | 'CHAT' 
   | 'IMAGE_GEN' 
+  | 'AUDIO'
   | 'BANANA_EDIT_ASYNC' 
   | 'VIDEO_GEN_MINIMAX' 
   | 'VIDEO_GEN_STD' 
@@ -12,11 +13,13 @@ export type StrategyType =
   | 'MJ_MODAL' 
   | 'MJ_ACTION';
 
+export type ModelCategory = 'TEXT' | 'IMAGE' | 'AUDIO' | 'VIDEO';
+
 export interface ModelDef {
   id: string; 
   name: string; 
   type: StrategyType;
-  category: 'IMAGE' | 'VIDEO';
+  category: ModelCategory;
   defaultEndpoint: string;
   defaultQueryEndpoint?: string; 
   defaultDownloadEndpoint?: string; 
@@ -29,6 +32,7 @@ export interface ModelConfig {
     endpoint: string;
     queryEndpoint?: string;
     downloadEndpoint?: string;
+    providerId?: string;
 }
 
 export interface ImageModelRules {

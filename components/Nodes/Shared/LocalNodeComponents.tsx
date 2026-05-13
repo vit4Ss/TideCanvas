@@ -77,17 +77,33 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
     const activeItem = isDark ? 'bg-blue-500/15 text-blue-400' : 'bg-blue-50 text-blue-600';
     const flyoutBg = isDark ? 'bg-[#1a1a1a] border-zinc-700' : 'bg-white border-gray-200 shadow-xl';
 
-    const activeGroupItems = hoveredGroup ? (options.find((o: any) => typeof o === 'object' && o.label === hoveredGroup)?.items || []) : [];
+    const isGroupOption = (option: any) => option && typeof option === 'object' && Array.isArray(option.items);
+    const getOptionLabel = (option: any) => option && typeof option === 'object' ? option.label : option;
+    const getOptionValue = (option: any) => option && typeof option === 'object' && !isGroupOption(option) ? (option.value ?? option.label) : option;
+    const findDisplayValue = (items: any[]): any => {
+        for (const item of items) {
+            if (isGroupOption(item)) {
+                const found = findDisplayValue(item.items || []);
+                if (found) return found;
+            } else if (getOptionValue(item) === value) {
+                return getOptionLabel(item);
+            }
+        }
+        return value;
+    };
+
+    const activeGroupItems = hoveredGroup ? (options.find((o: any) => isGroupOption(o) && o.label === hoveredGroup)?.items || []) : [];
+    const triggerValue = findDisplayValue(options);
 
     return (
         <div className="relative flex items-center" ref={ref}>
             {/* Trigger Button */}
             <button 
-                className={`flex items-center gap-2 cursor-pointer group h-8 px-3 rounded-lg border transition-all ${
+                className={`flex items-center gap-2 cursor-pointer group h-9 px-3.5 rounded-xl border border-transparent transition-all ${
                     isOpen 
-                        ? (isDark ? 'bg-zinc-700 border-zinc-600' : 'bg-gray-100 border-gray-300') 
-                        : (isDark ? 'border-zinc-700 hover:border-zinc-600' : 'border-gray-200 hover:border-gray-300')
-                } ${hoverClass}`} 
+                        ? (isDark ? 'bg-zinc-800 shadow-md shadow-black/20' : 'bg-white shadow-md shadow-gray-200/70') 
+                        : (isDark ? 'bg-transparent hover:bg-zinc-800 hover:shadow-md hover:shadow-black/20' : 'bg-transparent hover:bg-white hover:shadow-md hover:shadow-gray-200/70')
+                }`} 
                 onClick={(e) => { e.stopPropagation(); onToggle(); }}
             >
                 {Icon && <Icon size={15} className={`transition-colors ${isOpen ? (isDark ? 'text-blue-400' : 'text-blue-600') : iconColor}`} />}
@@ -96,7 +112,7 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
                         ? (isDark ? 'text-white' : 'text-gray-900') 
                         : (isDark ? 'text-zinc-300 group-hover:text-white' : 'text-gray-600 group-hover:text-gray-900')
                 } ${Icon ? 'min-w-[20px] text-center' : 'max-w-[90px] truncate'}`}>
-                    {value}
+                    {triggerValue}
                 </span>
                 {!Icon && <Icons.ChevronRight size={12} className={`transition-all duration-200 ${isOpen ? 'rotate-[-90deg] text-blue-400' : `rotate-90 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}`} />}
             </button>
@@ -107,12 +123,13 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
                     
                     <div ref={listRef} className="max-h-[300px] overflow-y-auto custom-scrollbar px-1.5">
                         {options.map((opt: any) => {
-                            const isGroup = typeof opt === 'object';
-                            const label = isGroup ? opt.label : opt;
-                            const isDisabled = !isGroup && disabledOptions.includes(label);
-                            const isSelected = !isGroup && label === value;
+                            const isGroup = isGroupOption(opt);
+                            const label = getOptionLabel(opt);
+                            const optionValue = getOptionValue(opt);
+                            const isDisabled = !isGroup && (disabledOptions.includes(optionValue) || disabledOptions.includes(label));
+                            const isSelected = !isGroup && optionValue === value;
                             const isGroupHovered = isGroup && hoveredGroup === label;
-                            const containsSelection = isGroup && opt.items.includes(value);
+                            const containsSelection = isGroup && opt.items.some((item: any) => getOptionValue(item) === value);
                             
                             return (
                                 <div 
@@ -133,7 +150,7 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
                                     onMouseLeave={handleMouseLeave}
                                     onClick={(e) => { 
                                         e.stopPropagation(); 
-                                        if (!isGroup && !isDisabled) { onChange(label); onClose(); }
+                                        if (!isGroup && !isDisabled) { onChange(optionValue); onClose(); }
                                     }}
                                 >
                                     <span className="whitespace-nowrap pr-2">{label}</span>
@@ -153,22 +170,24 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
                             onMouseLeave={handleMouseLeave}
                         >
                             <div className="max-h-[250px] overflow-y-auto custom-scrollbar px-1.5">
-                                {activeGroupItems.map((subItem: string) => {
-                                    const isSubSelected = subItem === value;
+                                {activeGroupItems.map((subItem: any) => {
+                                    const subLabel = getOptionLabel(subItem);
+                                    const subValue = getOptionValue(subItem);
+                                    const isSubSelected = subValue === value;
                                     return (
                                         <div 
-                                            key={subItem}
+                                            key={`${subLabel}-${subValue}`}
                                             className={`px-3 py-2 text-xs font-medium rounded-lg transition-colors flex items-center justify-between cursor-pointer mb-0.5
                                                 ${isSubSelected ? activeItem : optionHover}
                                                 ${!isSubSelected && isDark ? 'text-zinc-300' : ''} 
                                             `}
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                onChange(subItem);
+                                                onChange(subValue);
                                                 onClose();
                                             }}
                                         >
-                                            <span className="truncate">{subItem}</span>
+                                            <span className="truncate">{subLabel}</span>
                                             {isSubSelected && <Icons.Check size={12} className="text-blue-400 shrink-0 ml-2" />}
                                         </div>
                                     );
@@ -193,15 +212,18 @@ export const LocalThumbnailItem = memo(({ src, index, isDark }: { src: string, i
     );
 });
 
-export const LocalInputThumbnails = memo(({ inputs, ready, isDark, label }: { inputs: string[], ready: boolean, isDark: boolean, label?: string }) => {
+export const LocalInputThumbnails = memo(({ inputs, ready, isDark, label, compact = false }: { inputs: string[], ready: boolean, isDark: boolean, label?: string, compact?: boolean }) => {
     if (!inputs || inputs.length === 0) return null;
     const labelColor = isDark ? 'text-zinc-500' : 'text-gray-400';
+    const sizeClass = compact ? 'w-[36px] h-[36px]' : 'w-[48px] h-[48px]';
     return (
-       <div className="flex flex-col items-center gap-1 pb-2">
+       <div className={`flex flex-col ${compact ? 'items-start gap-1 pb-1' : 'items-center gap-1 pb-2'}`}>
            {label && <span className={`text-[9px] font-bold uppercase ${labelColor}`}>{label}</span>}
-           <div className="flex justify-center gap-2 overflow-x-auto no-scrollbar min-h-[48px]">
+           <div className={`flex ${compact ? 'justify-start' : 'justify-center'} gap-2 overflow-x-auto no-scrollbar ${compact ? 'min-h-[36px]' : 'min-h-[48px]'}`}>
                {inputs.slice(0, 8).map((src, i) => (
-                   ready ? <LocalThumbnailItem key={src + i} src={src} index={i} isDark={isDark} /> : <div key={i} className={`relative w-[48px] h-[48px] flex-shrink-0 border rounded-lg overflow-hidden shadow-sm ${isDark ? 'border-zinc-700 bg-black/40' : 'border-gray-300 bg-gray-100'}`}><div className={`absolute inset-0 ${isDark ? 'bg-zinc-800/50' : 'bg-gray-200'}`} /></div>
+                   ready
+                    ? <div key={src + i} className={compact ? 'scale-75 origin-top-left w-[36px] h-[36px]' : ''}><LocalThumbnailItem src={src} index={i} isDark={isDark} /></div>
+                    : <div key={i} className={`relative ${sizeClass} flex-shrink-0 border rounded-lg overflow-hidden shadow-sm ${isDark ? 'border-zinc-700 bg-black/40' : 'border-gray-300 bg-gray-100'}`}><div className={`absolute inset-0 ${isDark ? 'bg-zinc-800/50' : 'bg-gray-200'}`} /></div>
                ))}
            </div>
        </div>

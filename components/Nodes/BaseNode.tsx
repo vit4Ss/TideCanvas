@@ -71,16 +71,18 @@ const BaseNode: React.FC<BaseNodeProps> = ({
       case NodeType.IMAGE_TO_IMAGE: return 'purple';
       case NodeType.IMAGE_TO_VIDEO: return 'orange';
       case NodeType.START_END_TO_VIDEO: return 'emerald';
+      case NodeType.ORIGINAL_VIDEO: return 'orange';
+      case NodeType.PANORAMA_360: return 'cyan';
       default: return 'cyan';
     }
   };
 
   const accentColor = getAccentColor();
-  const showInputPort = data.type !== NodeType.ORIGINAL_IMAGE;
+  const showInputPort = data.type !== NodeType.ORIGINAL_IMAGE && data.type !== NodeType.ORIGINAL_VIDEO && data.type !== NodeType.PANORAMA_360;
 
   return (
     <div 
-      className="absolute flex flex-col group"
+      className="absolute flex flex-col group transition-[width,height] transition-node-resize"
       style={{
         left: data.x,
         top: data.y,

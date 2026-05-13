@@ -2,7 +2,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { NodeData } from '../../types';
 import { Icons } from '../Icons';
-import { getModelConfig, MODEL_REGISTRY, getVisibleModels } from '../../services/geminiService';
+import { getModelConfig } from '../../services/geminiService';
+import { getCanvasModelOptions, CanvasModelOption } from '../../services/modelService';
 import { IMAGE_HANDLERS } from '../../services/mode/image/configurations';
 import { LocalEditableTitle, LocalCustomDropdown, LocalInputThumbnails, LocalMediaStack } from './Shared/LocalNodeComponents';
 
@@ -25,31 +26,40 @@ export const ImageToImageNode: React.FC<ImageToImageNodeProps> = ({
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [deferredInputs, setDeferredInputs] = useState(false);
     const [isConfigured, setIsConfigured] = useState(true);
-    const [imageModels, setImageModels] = useState<string[]>([]);
+    const [imageModels, setImageModels] = useState<CanvasModelOption[]>([]);
 
     const isSelectedAndStable = selected && !isSelecting;
     const hasInputImage = inputs.length > 0;
 
     const checkConfig = useCallback(() => {
-         const mName = data.model || 'BananaPro';
-         const cfg = getModelConfig(mName);
+         if (!data.model) {
+             setIsConfigured(false);
+             return;
+         }
+         const cfg = getModelConfig(data.model);
          setIsConfigured(!!cfg.key);
     }, [data.model]);
 
     const updateModels = useCallback(() => {
-        const visibleModels = getVisibleModels();
-        const models = visibleModels.filter(k => MODEL_REGISTRY[k]?.category === 'IMAGE');
+        const models = getCanvasModelOptions('IMAGE');
         setImageModels(models);
-    }, []);
+        if (models.length > 0 && !models.some(item => item.value === data.model)) {
+            updateData(data.id, { model: models[0].value });
+        } else if (models.length === 0 && data.model) {
+            updateData(data.id, { model: '' });
+        }
+    }, [data.id, data.model, updateData]);
 
     useEffect(() => { 
         checkConfig(); 
         updateModels();
         window.addEventListener('modelConfigUpdated', checkConfig); 
         window.addEventListener('modelRegistryUpdated', updateModels);
+        window.addEventListener('modelServiceUpdated', updateModels);
         return () => {
             window.removeEventListener('modelConfigUpdated', checkConfig);
             window.removeEventListener('modelRegistryUpdated', updateModels);
+            window.removeEventListener('modelServiceUpdated', updateModels);
         };
     }, [checkConfig, updateModels]);
 
@@ -145,7 +155,7 @@ export const ImageToImageNode: React.FC<ImageToImageNodeProps> = ({
                           <textarea className={`w-full border rounded-xl p-3 text-[11px] leading-relaxed resize-none focus:outline-none min-h-[70px] no-scrollbar ${inputBg}`} placeholder="描述你想要的变化效果..." value={data.prompt || ''} onChange={(e) => updateData(data.id, { prompt: e.target.value })} onWheel={(e) => e.stopPropagation()} />
                       </div>
                       <div className="flex items-center justify-between gap-2 h-7">
-                          <LocalCustomDropdown options={imageModels} value={data.model || 'BananaPro'} onChange={(val: any) => updateData(data.id, { model: val })} isOpen={activeDropdown === 'model'} onToggle={() => setActiveDropdown(activeDropdown === 'model' ? null : 'model')} onClose={() => setActiveDropdown(null)} align="left" width="w-[120px]" isDark={isDark} />
+                          <LocalCustomDropdown options={imageModels} value={data.model || '未选择模型'} onChange={(val: any) => updateData(data.id, { model: val })} isOpen={activeDropdown === 'model'} onToggle={() => setActiveDropdown(activeDropdown === 'model' ? null : 'model')} onClose={() => setActiveDropdown(null)} align="left" width="w-[140px]" isDark={isDark} />
                           <div className={`w-px h-3 ${dividerColor}`}></div>
                           <div className="flex items-center gap-1">
                               <LocalCustomDropdown icon={Icons.Crop} options={supportedRatios} value={data.aspectRatio || '1:1'} onChange={handleRatioChange} isOpen={activeDropdown === 'ratio'} onToggle={() => setActiveDropdown(activeDropdown === 'ratio' ? null : 'ratio')} onClose={() => setActiveDropdown(null)} isDark={isDark} />

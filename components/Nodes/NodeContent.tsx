@@ -5,11 +5,13 @@ import { TextToVideoNode } from './TextToVideoNode';
 import { StartEndToVideoNode } from './StartEndToVideoNode';
 import { OriginalImageNode } from './OriginalImageNode';
 import { CreativeDescNode } from './CreativeDescNode';
+import { PanoramaNode } from './PanoramaNode';
 
 interface NodeContentProps {
   data: NodeData;
   updateData: (id: string, updates: Partial<NodeData>) => void;
   onGenerate: (id: string) => void;
+  onPanorama?: (id: string) => void;
   selected?: boolean;
   showControls?: boolean;
   inputs?: string[];
@@ -19,6 +21,7 @@ interface NodeContentProps {
   isSelecting?: boolean;
   onDelete?: (id: string) => void;
   isDark?: boolean;
+  canvasScale?: number;
 }
 
 const NodeContentComponent: React.FC<NodeContentProps> = (props) => {
@@ -26,13 +29,18 @@ const NodeContentComponent: React.FC<NodeContentProps> = (props) => {
 
     switch (data.type) {
         case NodeType.TEXT_TO_IMAGE:
+        case NodeType.IMAGE_TO_IMAGE:
             return <TextToImageNode {...props} />;
         case NodeType.TEXT_TO_VIDEO:
+        case NodeType.IMAGE_TO_VIDEO:
             return <TextToVideoNode {...props} />;
         case NodeType.START_END_TO_VIDEO:
             return <StartEndToVideoNode {...props} />;
         case NodeType.ORIGINAL_IMAGE:
+        case NodeType.ORIGINAL_VIDEO:
             return <OriginalImageNode {...props} />;
+        case NodeType.PANORAMA_360:
+            return <PanoramaNode {...props} />;
         case NodeType.CREATIVE_DESC:
             return <CreativeDescNode {...props} />;
         default:
@@ -43,6 +51,7 @@ const NodeContentComponent: React.FC<NodeContentProps> = (props) => {
 export const NodeContent = memo(NodeContentComponent, (prev, next) => {
     if (prev.isSelecting !== next.isSelecting) return false;
     if (prev.isDark !== next.isDark) return false;
+    if (prev.canvasScale !== next.canvasScale) return false;
     
     // Check Inputs
     if (prev.inputs !== next.inputs) {

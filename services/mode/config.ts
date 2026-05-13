@@ -1,6 +1,7 @@
 
 import { EnvConfig } from "../env";
 import type { ModelDef, ModelConfig } from "./types";
+import { resolveProviderEndpoint } from "../providerService";
 
 export type { ModelConfig };
 
@@ -22,6 +23,15 @@ const loadDeletedModels = (): Set<string> => {
         const stored = localStorage.getItem(DELETED_MODELS_KEY);
         return stored ? new Set(JSON.parse(stored)) : new Set();
     } catch(e) { return new Set(); }
+};
+
+const unhideModel = (key: string): void => {
+    if (typeof window === 'undefined') return;
+    const deleted = loadDeletedModels();
+    if (!deleted.has(key)) return;
+    deleted.delete(key);
+    deletedModels.delete(key);
+    localStorage.setItem(DELETED_MODELS_KEY, JSON.stringify([...deleted]));
 };
 
 const customModels = loadCustomModels();
@@ -152,14 +162,17 @@ export const getModelConfig = (modelName: string): ModelConfig => {
                 });
             }
             
+            // 解析服务商回退（优先级：模型特定 > 服务商 > 全局 > 默认）
+            const providerEndpoint = parsed.providerId ? resolveProviderEndpoint(parsed.providerId) : null;
+
             return {
-                // 模型特定配置优先，否则使用全局配置
-                baseUrl: parsed.baseUrl || globalConfig.baseUrl || EnvConfig.DEFAULT_BASE_URL,
-                key: parsed.key || globalConfig.key || '', 
+                baseUrl: parsed.baseUrl || providerEndpoint?.baseUrl || globalConfig.baseUrl || EnvConfig.DEFAULT_BASE_URL,
+                key: parsed.key || providerEndpoint?.key || globalConfig.key || '',
                 modelId: parsed.modelId || def.id,
                 endpoint: endpoint || def.defaultEndpoint,
                 queryEndpoint: queryEndpoint || def.defaultQueryEndpoint || '',
-                downloadEndpoint: downloadEndpoint || def.defaultDownloadEndpoint || ''
+                downloadEndpoint: downloadEndpoint || def.defaultDownloadEndpoint || '',
+                providerId: parsed.providerId,
             };
         }
     }
