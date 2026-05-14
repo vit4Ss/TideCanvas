@@ -122,8 +122,11 @@ const inferSlotKey = (category: ModelServiceCategory, modelName: string, modelId
     return matched?.key || DEFAULT_SLOT_KEY_BY_CATEGORY[category];
 };
 
-export const getModelServiceRegistryKey = (binding: Pick<ModelServiceBinding, 'category' | 'slotKey' | 'id'>): string => {
+export const getModelServiceRegistryKey = (binding: Pick<ModelServiceBinding, 'category' | 'slotKey' | 'id'> & { modelId?: string }): string => {
     const slot = getSlotByKey(binding.slotKey, binding.category);
+    // 同一 slot 允许多个模型 → registryKey 必须按 modelId 区分；缺少 modelId 时回退到 slot 名 + 随机 id
+    const modelPart = sanitizeRegistryPart(binding.modelId || '');
+    if (modelPart) return `${ENUM_PREFIX}${binding.category}/${sanitizeRegistryPart(slot.name)}/${modelPart}`;
     return `${ENUM_PREFIX}${binding.category}/${sanitizeRegistryPart(slot.name) || binding.id}`;
 };
 
@@ -206,8 +209,9 @@ const canRegisterToCanvas = (category: ModelServiceCategory): boolean => {
 };
 
 export const syncModelServiceBindingToRegistry = (binding: ModelServiceBinding): ModelServiceBinding => {
-    const registryKey = getModelServiceRegistryKey(binding);
-    if (binding.registryKey && binding.registryKey !== registryKey) deleteModel(binding.registryKey);
+    // 已有 registryKey 时保留原值，避免破坏画布中既存节点对旧 key 的引用
+    const computed = getModelServiceRegistryKey(binding);
+    const registryKey = binding.registryKey || computed;
     if (!binding.enabled || !canRegisterToCanvas(binding.category)) return { ...binding, registryKey };
 
     const def: ModelDef = {
@@ -222,10 +226,29 @@ export const syncModelServiceBindingToRegistry = (binding: ModelServiceBinding):
 
     registerCustomModel(registryKey, def);
     const current = getModelConfig(registryKey);
+    // 把绑定服务商的 baseUrl / apiKey 显式带过来：用户在「服务商」已经填好的凭证应当自动出现在模型配置里
+    const provider = binding.providerId ? loadProviders().find(p => p.id === binding.providerId) : null;
+    // 直接读 localStorage 里 raw 的 parsed 数据，判断用户是否「显式保存过」baseUrl / key
+    // 不能依赖 current.baseUrl —— 因为 getModelConfig 有 EnvConfig.DEFAULT_BASE_URL 的兜底，
+    // 新绑定时 current.baseUrl 永远是 'https://api.openai.com'，会把 provider.baseUrl 顶掉
+    let rawParsed: any = null;
+    try {
+        const rawStr = typeof window !== 'undefined' ? window.localStorage.getItem(`API_CONFIG_MODEL_${registryKey}`) : null;
+        if (rawStr) rawParsed = JSON.parse(rawStr);
+    } catch {}
+    // 'https://api.openai.com' 是 EnvConfig.DEFAULT_BASE_URL 兜底产生的旧值，迁移时视为未设置以便从 provider 取真实地址
+    const DEFAULT_BASE_URL_LEGACY = 'https://api.openai.com';
+    const rawBaseUrl = rawParsed && typeof rawParsed.baseUrl === 'string' ? rawParsed.baseUrl.trim() : '';
+    const hasUserBaseUrl = !!rawBaseUrl && (!provider || rawBaseUrl !== DEFAULT_BASE_URL_LEGACY || provider.baseUrl === DEFAULT_BASE_URL_LEGACY);
+    const hasUserKey = !!(rawParsed && typeof rawParsed.key === 'string' && rawParsed.key.trim());
+
     const config: ModelConfig = {
         ...current,
         modelId: binding.modelId,
         providerId: binding.providerId,
+        // 用户没显式填过就用服务商的；填过就保留用户值
+        baseUrl: hasUserBaseUrl ? rawParsed.baseUrl : (provider?.baseUrl || ''),
+        key:     hasUserKey     ? rawParsed.key     : (provider?.apiKey  || ''),
         endpoint: binding.endpoint || def.defaultEndpoint,
         queryEndpoint: binding.queryEndpoint || def.defaultQueryEndpoint || '',
         downloadEndpoint: binding.downloadEndpoint || def.defaultDownloadEndpoint || '',
@@ -236,15 +259,13 @@ export const syncModelServiceBindingToRegistry = (binding: ModelServiceBinding):
 
 export const syncAllModelServiceBindingsToRegistry = (): ModelServiceBinding[] => {
     const bindings = loadModelServiceBindings();
-    const latestBySlot = new Map<string, ModelServiceBinding>();
-    bindings.forEach(binding => latestBySlot.set(`${binding.category}:${binding.slotKey}`, binding));
-    const deduped = Array.from(latestBySlot.values());
-    bindings
-        .filter(binding => !deduped.some(item => item.id === binding.id))
-        .forEach(binding => {
-            const fixedRegistryKey = getModelServiceRegistryKey(binding);
-            if (binding.registryKey && binding.registryKey !== fixedRegistryKey) deleteModel(binding.registryKey);
-        });
+    // 只按 id 去重（防御性处理），不再按 slot 去重 —— 同一个 slot 可以绑多个模型
+    const seen = new Set<string>();
+    const deduped = bindings.filter(b => {
+        if (seen.has(b.id)) return false;
+        seen.add(b.id);
+        return true;
+    });
     const synced = deduped.map(syncModelServiceBindingToRegistry);
     if (JSON.stringify(bindings) !== JSON.stringify(synced)) saveModelServiceBindings(synced);
     return synced;
@@ -256,11 +277,17 @@ export const upsertModelServiceBinding = (draft: ModelServiceDraft, existingId?:
     const list = loadModelServiceBindings();
     const modelName = stripDisplaySuffix(draft.name?.trim() || getProviderModelName(provider, draft.modelId)) || draft.modelId;
     const slotKey = getSlotByKey(draft.slotKey || inferSlotKey(draft.category, modelName, draft.modelId), draft.category).key;
+    // 去重规则改为按 (category, providerId, modelId) —— 同一个具体模型只允许有一条绑定；不同模型即使在同一 slot 也共存
     const existing = existingId
         ? list.find(b => b.id === existingId)
-        : list.find(b => b.category === draft.category && b.slotKey === slotKey);
-    const registryKey = getModelServiceRegistryKey({ category: draft.category, slotKey, id: existing?.id || draft.modelId });
-    if (existing?.registryKey && existing.registryKey !== registryKey) deleteModel(existing.registryKey);
+        : list.find(b =>
+            b.category === draft.category &&
+            b.providerId === draft.providerId &&
+            b.modelId === draft.modelId,
+        );
+    // 新建走新格式 registryKey；编辑已有绑定时保留旧 key，避免破坏画布节点引用
+    const computedRegistryKey = getModelServiceRegistryKey({ category: draft.category, slotKey, modelId: draft.modelId, id: existing?.id || draft.modelId });
+    const registryKey = existing?.registryKey || computedRegistryKey;
     const base: ModelServiceBinding = {
         id: existing?.id || generateId(),
         category: draft.category,
@@ -275,7 +302,7 @@ export const upsertModelServiceBinding = (draft: ModelServiceDraft, existingId?:
         downloadEndpoint: draft.downloadEndpoint || '',
     };
     const synced = syncModelServiceBindingToRegistry(base);
-    const next = [...list.filter(item => item.id !== existing?.id && !(item.category === draft.category && item.slotKey === slotKey)), synced];
+    const next = [...list.filter(item => item.id !== (existing?.id || '__none__')), synced];
     saveModelServiceBindings(next);
     return synced;
 };
@@ -296,10 +323,18 @@ export const getPrimaryModelServiceBinding = (category: ModelServiceCategory): M
 export const getCanvasModelOptions = (category: ModelServiceCategory): CanvasModelOption[] => {
     return loadModelServiceBindings()
         .filter(item => item.enabled && item.category === category && item.registryKey && canRegisterToCanvas(item.category))
-        .map(item => ({
-            value: item.registryKey!,
-            label: getModelServiceDisplayName(item.category, item.name, item.slotKey),
-        }));
+        .map(item => {
+            const slot = getSlotByKey(item.slotKey, item.category);
+            const cleaned = stripDisplaySuffix(item.name || '').trim();
+            // 多个模型可能绑定在同一 slot，标签优先用具体模型名，括号附带 slot 分类便于识别
+            const label = cleaned && cleaned !== slot.name
+                ? `${cleaned}（${slot.name}）`
+                : slot.name;
+            return {
+                value: item.registryKey!,
+                label,
+            };
+        });
 };
 
 const PROVIDER_TYPE_BY_CATEGORY: Record<ModelServiceCategory, string> = {

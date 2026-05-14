@@ -27,6 +27,20 @@ export const ImageToImageNode: React.FC<ImageToImageNodeProps> = ({
     const [deferredInputs, setDeferredInputs] = useState(false);
     const [isConfigured, setIsConfigured] = useState(true);
     const [imageModels, setImageModels] = useState<CanvasModelOption[]>([]);
+    const [progress, setProgress] = useState(0);
+
+    useEffect(() => {
+        let interval: any;
+        if (data.isLoading) {
+            setProgress(0);
+            interval = setInterval(() => {
+                setProgress(prev => (prev >= 95 ? 95 : prev + Math.max(0.5, (95 - prev) / 20)));
+            }, 200);
+        } else {
+            setProgress(0);
+        }
+        return () => clearInterval(interval);
+    }, [data.isLoading]);
 
     const isSelectedAndStable = selected && !isSelecting;
     const hasInputImage = inputs.length > 0;
@@ -138,7 +152,26 @@ export const ImageToImageNode: React.FC<ImageToImageNodeProps> = ({
                      )}
                  </div>
              )}
-             {data.isLoading && <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-20"><Icons.Loader2 size={24} className="text-purple-500 animate-spin" /></div>}
+             {data.isLoading && (
+                 <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-20">
+                     <div className="relative w-14 h-14 mb-3">
+                         <svg className="w-full h-full -rotate-90" viewBox="0 0 64 64">
+                             <circle cx="32" cy="32" r="28" fill="none" stroke={isDark ? '#3f3f46' : '#e5e7eb'} strokeWidth="4" />
+                             <circle
+                                 cx="32" cy="32" r="28" fill="none"
+                                 stroke="#a855f7" strokeWidth="4"
+                                 strokeLinecap="round"
+                                 strokeDasharray={`${progress * 1.76} 176`}
+                                 className="transition-all duration-300"
+                             />
+                         </svg>
+                         <div className="absolute inset-0 flex items-center justify-center">
+                             <span className="text-white font-bold text-xs tabular-nums">{Math.floor(progress)}%</span>
+                         </div>
+                     </div>
+                     <span className="text-white/80 text-xs font-medium">生成中...</span>
+                 </div>
+             )}
         </div>
 
         {isSelectedAndStable && showControls && (

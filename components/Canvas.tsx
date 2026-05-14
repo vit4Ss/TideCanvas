@@ -142,7 +142,7 @@ const Canvas: React.FC = () => {
 
     try {
       if (node.type === NodeType.CREATIVE_DESC) {
-        const res = await generateCreativeDescription(node.prompt || '', node.model === 'VIDEO' ? 'VIDEO' : 'IMAGE');
+        const res = await generateCreativeDescription(node.prompt || '', node.model === 'VIDEO' ? 'VIDEO' : 'IMAGE', node.model);
         updateNodeData(nodeId, { optimizedPrompt: res, isLoading: false });
       } else if (node.type === NodeType.TEXT_TO_IMAGE) {
         const res = await generateImage(node.prompt || '', node.aspectRatio);

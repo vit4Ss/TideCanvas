@@ -51,6 +51,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
     // 模型配置
     const [configs, setConfigs] = useState<Record<string, ModelConfig>>({});
     const [expandedModels, setExpandedModels] = useState<Set<string>>(new Set());
+    const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
+    const toggleRevealKey = (k: string) => setRevealedKeys(prev => {
+        const next = new Set(prev);
+        if (next.has(k)) next.delete(k); else next.add(k);
+        return next;
+    });
     const [searchTerm, setSearchTerm] = useState('');
     const [filterType, setFilterType] = useState<'all' | 'image' | 'video'>('all');
     
@@ -76,7 +82,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
         AUDIO: 'AUDIO_TTS',
         VIDEO: 'VIDEO_SORA_2',
     });
-    const [activeModelCategory, setActiveModelCategory] = useState<ModelServiceCategory>('IMAGE');
+    // 模型管理：折叠状态。默认所有分类展开，存入集合的为已折叠。
+    const [collapsedCategories, setCollapsedCategories] = useState<Set<ModelServiceCategory>>(new Set());
+    const toggleCategoryCollapse = (key: ModelServiceCategory) => {
+        setCollapsedCategories(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key); else next.add(key);
+            return next;
+        });
+    };
 
     const configInputRef = useRef<HTMLInputElement>(null);
 
@@ -378,6 +392,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
         search: string;
     } | null>(null);
 
+    // 凭证齐全后自动拉取模型的状态显示（不打开选择弹窗，直接静默写入）
+    const [autoFetchStatus, setAutoFetchStatus] = useState<Record<string, { loading?: boolean; ok?: boolean; error?: string; count?: number }>>({});
+    const autoFetchTimersRef = useRef<Record<string, number>>({});
+    const autoFetchedSigRef = useRef<Record<string, string>>({});
+
     useEffect(() => {
         if (isOpen) {
             const list = loadProviders();
@@ -388,6 +407,53 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
             });
         }
     }, [isOpen]);
+
+    // 自动拉取：当 baseUrl + apiKey 都填好且该 provider 尚未拥有模型时，防抖触发
+    useEffect(() => {
+        if (!isOpen) return;
+        providers.forEach(provider => {
+            const sig = `${provider.baseUrl}::${provider.apiKey}`;
+            // 凭证变更则取消旧 timer
+            const existing = autoFetchTimersRef.current[provider.id];
+            if (existing) {
+                window.clearTimeout(existing);
+                delete autoFetchTimersRef.current[provider.id];
+            }
+            if (!provider.baseUrl || !provider.apiKey) return;
+            if (provider.models.length > 0) return;
+            if (autoFetchedSigRef.current[provider.id] === sig) return;
+
+            autoFetchTimersRef.current[provider.id] = window.setTimeout(async () => {
+                delete autoFetchTimersRef.current[provider.id];
+                autoFetchedSigRef.current[provider.id] = sig;
+                setAutoFetchStatus(prev => ({ ...prev, [provider.id]: { loading: true } }));
+                const controller = new AbortController();
+                const timeout = window.setTimeout(() => controller.abort(), 15000);
+                try {
+                    const result = await fetchProviderModels(provider, controller.signal);
+                    if (result.ok && result.models && result.models.length > 0) {
+                        addModelsToProvider(provider.id, result.models);
+                        setProviders(loadProviders());
+                        setAutoFetchStatus(prev => ({ ...prev, [provider.id]: { ok: true, count: result.models!.length } }));
+                    } else {
+                        setAutoFetchStatus(prev => ({ ...prev, [provider.id]: { ok: false, error: result.error || '未识别到模型列表' } }));
+                    }
+                } catch (e: any) {
+                    setAutoFetchStatus(prev => ({ ...prev, [provider.id]: { ok: false, error: e?.message || '获取失败' } }));
+                } finally {
+                    window.clearTimeout(timeout);
+                }
+            }, 800);
+        });
+    }, [providers, isOpen]);
+
+    // 组件卸载时清理所有 pending 自动拉取定时器
+    useEffect(() => {
+        return () => {
+            Object.values(autoFetchTimersRef.current).forEach(t => window.clearTimeout(t));
+            autoFetchTimersRef.current = {};
+        };
+    }, []);
 
     const updateProvider = (id: string, patch: Partial<Provider>) => {
         setProviders(prev => {
@@ -624,6 +690,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
                                 testResult={providerTestResults[selected.id]}
                                 onRemoveModel={(modelId) => handleRemoveModel(selected.id, modelId)}
                                 onFetchModels={() => handleOpenFetchModels(selected)}
+                                autoFetchStatus={autoFetchStatus[selected.id]}
                             />
                         ) : (
                             <div className={`h-full flex items-center justify-center ${textMuted} text-sm`}>请选择一个服务商</div>
@@ -822,146 +889,265 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
 
         return (
             <div className="space-y-5">
-                <SectionHeader title="模型管理" subtitle="把服务商获取到的模型绑定成文本、图像、音频、视频枚举；图像/视频会同步到画布模型下拉。" isDark={isDark} />
+                <SectionHeader
+                    title="模型管理"
+                    subtitle="把「服务商」中获取的模型绑定到文本 / 图像 / 音频 / 视频枚举，画布的模型下拉会自动同步。"
+                    isDark={isDark}
+                />
+
+                {/* 顶部统计栏 */}
+                {(() => {
+                    const stats = MODEL_SERVICE_CATEGORIES.map(c => ({
+                        key: c.key,
+                        label: c.label,
+                        count: modelServiceBindings.filter(b => b.category === c.key).length,
+                    }));
+                    const total = stats.reduce((s, x) => s + x.count, 0);
+                    return (
+                        <div className={`rounded-2xl border ${borderColor} ${surfaceCard} px-5 py-3 flex items-center gap-4 flex-wrap`}>
+                            <div className="flex items-center gap-2">
+                                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${isDark ? 'bg-blue-500/15 text-blue-300' : 'bg-blue-50 text-blue-600'}`}>
+                                    <Icons.Layers size={15} />
+                                </div>
+                                <div>
+                                    <div className={`text-sm font-bold ${textMain}`}>已绑定 {total} 个模型</div>
+                                    <div className={`text-[11px] ${textMuted}`}>跨 {stats.filter(s => s.count > 0).length} 个能力分类</div>
+                                </div>
+                            </div>
+                            <div className="flex-1" />
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                                {stats.map(s => {
+                                    const TabIcon = categoryIconMap[s.key];
+                                    return (
+                                        <button
+                                            key={s.key}
+                                            onClick={() => setCollapsedCategories(prev => {
+                                                const next = new Set(prev);
+                                                next.delete(s.key);
+                                                return next;
+                                            })}
+                                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] border ${borderColor} ${isDark ? 'hover:bg-white/5' : 'hover:bg-slate-50'} ${s.count === 0 ? 'opacity-60' : ''}`}
+                                            title={s.count === 0 ? '尚未绑定，点击展开此分类' : `展开 ${s.label}`}
+                                        >
+                                            <TabIcon size={12} className={textMuted} />
+                                            <span className={textMain}>{s.label}</span>
+                                            <span className={`min-w-[18px] h-[16px] px-1 inline-flex items-center justify-center rounded-md text-[10px] ${s.count > 0 ? (isDark ? 'bg-blue-500/20 text-blue-300' : 'bg-blue-50 text-blue-600') : (isDark ? 'bg-white/5 text-zinc-400' : 'bg-slate-100 text-gray-500')}`}>
+                                                {s.count}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 <div className={`rounded-2xl border ${borderColor} ${surfaceCard} overflow-hidden`}>
-                    <div className={`px-5 py-4 border-b ${borderSoft}`}>
-                        <div className={`text-base font-bold ${textMain}`}>模型服务</div>
-                        <div className={`text-xs mt-1 ${textSub}`}>先在「服务商」中获取模型，再在这里按能力类型绑定。</div>
-                    </div>
-
-                    <div className={`px-5 pt-4 pb-2 border-b ${borderSoft}`}>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                            {MODEL_SERVICE_CATEGORIES.map(cat => {
-                                const TabIcon = categoryIconMap[cat.key];
-                                const isActive = activeModelCategory === cat.key;
-                                const count = modelServiceBindings.filter(item => item.category === cat.key).length;
-                                return (
-                                    <button
-                                        key={cat.key}
-                                        onClick={() => setActiveModelCategory(cat.key)}
-                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
-                                            isActive
-                                                ? `${categoryToneMap[cat.key]} border-transparent`
-                                                : `${borderColor} ${textSub} ${isDark ? 'hover:bg-white/5' : 'hover:bg-slate-50'}`
-                                        }`}
-                                    >
-                                        <TabIcon size={13} />
-                                        <span>{cat.label}</span>
-                                        {count > 0 && (
-                                            <span className={`min-w-[18px] h-[18px] px-1 inline-flex items-center justify-center rounded-full text-[10px] ${isActive ? (isDark ? 'bg-white/20' : 'bg-white') : (isDark ? 'bg-white/10' : 'bg-slate-100')}`}>
-                                                {count}
-                                            </span>
-                                        )}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-
                     <div className="divide-y divide-gray-200/10">
-                        {MODEL_SERVICE_CATEGORIES.filter(category => category.key === activeModelCategory).map(category => {
+                        {MODEL_SERVICE_CATEGORIES.map(category => {
                             const Icon = categoryIconMap[category.key];
                             const options = getCategoryModelOptions(category.key);
                             const bindings = modelServiceBindings.filter(item => item.category === category.key);
                             const selected = modelServiceSelections[category.key];
                             const slots = getModelServiceSlots(category.key);
                             const selectedSlot = modelServiceSlotSelections[category.key];
+                            const collapsed = collapsedCategories.has(category.key);
 
                             return (
-                                <div key={category.key} className="px-5 py-4 space-y-3">
-                                    <div className="flex items-center gap-2">
+                                <div key={category.key} className={`${collapsed ? 'py-0' : 'py-4'} px-5 ${collapsed ? '' : 'space-y-3'}`}>
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleCategoryCollapse(category.key)}
+                                        className={`w-full flex items-center gap-2 ${collapsed ? 'py-3' : ''} text-left ${isDark ? 'hover:opacity-90' : ''} transition-opacity`}
+                                        aria-expanded={!collapsed}
+                                    >
+                                        <Icons.ChevronRight
+                                            size={14}
+                                            className={`shrink-0 transition-transform ${textMuted} ${collapsed ? '' : 'rotate-90'}`}
+                                        />
                                         <span className={`w-8 h-8 rounded-xl flex items-center justify-center ${categoryToneMap[category.key]}`}>
                                             <Icon size={15} />
                                         </span>
-                                        <div className="flex-1">
-                                            <div className={`text-sm font-bold ${textMain}`}>{category.label}</div>
-                                            <div className={`text-[11px] ${textMuted}`}>{category.description}</div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className={`text-sm font-bold ${textMain} flex items-center gap-2`}>
+                                                <span>{category.label}</span>
+                                                {bindings.length > 0 && (
+                                                    <span className={`min-w-[18px] h-[18px] px-1 inline-flex items-center justify-center rounded-full text-[10px] ${isDark ? 'bg-white/10 text-zinc-300' : 'bg-slate-100 text-gray-600'}`}>
+                                                        {bindings.length}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className={`text-[11px] truncate ${textMuted}`}>{category.description}</div>
                                         </div>
-                                    </div>
+                                    </button>
 
-                                    <div className="flex items-center gap-2">
-                                        <select
-                                            value={selectedSlot}
-                                            onChange={e => setModelServiceSlotSelections(prev => ({ ...prev, [category.key]: e.target.value }))}
-                                            className={`w-44 px-4 py-2.5 ${inputBase}`}
-                                        >
-                                            {slots.map(slot => (
-                                                <option key={slot.key} value={slot.key}>
-                                                    {slot.name}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        <select
-                                            value={selected}
-                                            onChange={e => setModelServiceSelections(prev => ({ ...prev, [category.key]: e.target.value }))}
-                                            className={`flex-1 px-4 py-2.5 ${inputBase}`}
-                                        >
-                                            <option value="">未选择模型</option>
-                                            {options.map(item => (
-                                                <option key={item.value} value={item.value}>
-                                                    {item.label}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        <button
-                                            onClick={() => handleAddModelServiceBinding(category.key)}
-                                            disabled={!selected}
-                                            className={`w-10 h-10 rounded-xl flex items-center justify-center ${ghostButton} hover:border-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed`}
-                                            title="添加到枚举"
-                                        >
-                                            <Icons.Plus size={16} />
-                                        </button>
-                                    </div>
+                                    {!collapsed && (
+                                        <div className="space-y-3">
+                                            {/* 添加绑定区 */}
+                                            <div className={`rounded-xl border ${borderColor} ${isDark ? 'bg-white/[0.02]' : 'bg-slate-50/60'} p-2.5 flex items-center gap-2`}>
+                                                <select
+                                                    value={selectedSlot}
+                                                    onChange={e => setModelServiceSlotSelections(prev => ({ ...prev, [category.key]: e.target.value }))}
+                                                    className={`w-40 px-3 py-2 text-xs ${inputBase}`}
+                                                    title="模型分类（slot）"
+                                                >
+                                                    {slots.map(slot => (
+                                                        <option key={slot.key} value={slot.key}>{slot.name}</option>
+                                                    ))}
+                                                </select>
+                                                <select
+                                                    value={selected}
+                                                    onChange={e => setModelServiceSelections(prev => ({ ...prev, [category.key]: e.target.value }))}
+                                                    className={`flex-1 min-w-0 px-3 py-2 text-xs ${inputBase}`}
+                                                >
+                                                    <option value="">{options.length === 0 ? '暂无可用模型' : '选择服务商中的模型...'}</option>
+                                                    {options.map(item => (
+                                                        <option key={item.value} value={item.value}>{item.label}</option>
+                                                    ))}
+                                                </select>
+                                                <button
+                                                    onClick={() => handleAddModelServiceBinding(category.key)}
+                                                    disabled={!selected}
+                                                    className={`shrink-0 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${selected ? 'bg-blue-500 text-white hover:bg-blue-400' : `${ghostButton} opacity-50 cursor-not-allowed`}`}
+                                                    title="添加到枚举"
+                                                >
+                                                    <Icons.Plus size={13} /> 添加
+                                                </button>
+                                            </div>
 
-                                    {options.length === 0 && (
-                                        <div className={`text-xs ${textMuted}`}>
-                                            暂无可选模型。请先到「服务商」中获取模型。
-                                        </div>
-                                    )}
+                                            {options.length === 0 && bindings.length === 0 && (
+                                                <div className={`text-xs ${textMuted} px-1`}>
+                                                    暂无可选模型。请先到「服务商」中获取模型。
+                                                </div>
+                                            )}
 
-                                    {bindings.length > 0 && (
-                                        <div className="space-y-2">
-                                            {bindings.map(binding => {
-                                                const provider = providers.find(p => p.id === binding.providerId);
-                                                const connected = binding.category === 'TEXT' || binding.category === 'IMAGE' || binding.category === 'VIDEO';
+                                            {/* 按 slot 分组的绑定列表 + 内联配置 */}
+                                            {bindings.length > 0 && (() => {
+                                                const slotsWithBindings = slots.filter(slot => bindings.some(b => b.slotKey === slot.key));
                                                 return (
-                                                    <div
-                                                        key={binding.id}
-                                                        className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${borderColor} ${surfaceSoft}`}
-                                                    >
-                                                        <div className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
-                                                        <div className="min-w-0 w-44">
-                                                            <div className={`text-sm font-semibold truncate ${textMain}`}>{binding.name}</div>
-                                                            <div className={`text-[11px] truncate ${textMuted}`}>
-                                                                {provider?.name || '未知服务商'} · {binding.modelId}
-                                                            </div>
-                                                        </div>
-                                                        <div className={`hidden sm:flex flex-col min-w-[112px] px-2.5 py-1.5 rounded-lg border ${borderColor} ${isDark ? 'bg-white/5' : 'bg-blue-50'}`}>
-                                                            <span className={`text-[10px] ${textMuted}`}>模型映射</span>
-                                                            <span className={`text-xs font-semibold whitespace-nowrap ${isDark ? 'text-blue-300' : 'text-blue-600'}`}>{getModelServiceDisplayName(binding.category, binding.name, binding.slotKey)}</span>
-                                                        </div>
-                                                        <span className={`text-[10px] px-2 py-1 rounded-lg ${connected ? (isDark ? 'bg-emerald-500/10 text-emerald-300' : 'bg-emerald-50 text-emerald-600') : (isDark ? 'bg-amber-500/10 text-amber-300' : 'bg-amber-50 text-amber-600')}`}>
-                                                            {connected ? '已接入' : '预留'}
-                                                        </span>
-                                                        {binding.registryKey && (
-                                                            <button
-                                                                onClick={() => toggleExpand(binding.registryKey!)}
-                                                                className={`px-2 py-1 rounded-lg text-xs ${textSub} ${isDark ? 'hover:bg-white/5 hover:text-white' : 'hover:bg-white hover:text-gray-900'}`}
-                                                            >
-                                                                配置
-                                                            </button>
-                                                        )}
-                                                        <button
-                                                            onClick={() => handleRemoveModelServiceBinding(binding.id)}
-                                                            className={`p-1.5 rounded-lg ${textMuted} ${isDark ? 'hover:bg-red-500/10 hover:text-red-400' : 'hover:bg-red-50 hover:text-red-500'}`}
-                                                            title="移除枚举"
-                                                        >
-                                                            <Icons.Trash2 size={13} />
-                                                        </button>
+                                                    <div className="space-y-3">
+                                                        {slotsWithBindings.map(slot => {
+                                                            const slotBindings = bindings.filter(b => b.slotKey === slot.key);
+                                                            return (
+                                                                <div key={slot.key} className="space-y-1.5">
+                                                                    <div className="flex items-center gap-2 px-1">
+                                                                        <span className={`text-[10px] uppercase tracking-wider font-semibold ${textSub}`}>{slot.name}</span>
+                                                                        <span className={`text-[10px] ${textMuted}`}>· {slotBindings.length}</span>
+                                                                        <div className={`flex-1 h-px ${isDark ? 'bg-white/5' : 'bg-gray-200'}`} />
+                                                                    </div>
+                                                                    <div className="space-y-1.5">
+                                                                        {slotBindings.map(binding => {
+                                                                            const bindingProvider = providers.find(p => p.id === binding.providerId);
+                                                                            const connected = binding.category === 'TEXT' || binding.category === 'IMAGE' || binding.category === 'VIDEO';
+                                                                            const cfgKey = binding.registryKey || '';
+                                                                            const isExpanded = !!cfgKey && expandedModels.has(cfgKey);
+                                                                            const def = cfgKey ? MODEL_REGISTRY[cfgKey] : undefined;
+                                                                            const config = cfgKey ? (configs[cfgKey] || getModelConfig(cfgKey)) : undefined;
+                                                                            const cfgProvider = config?.providerId ? providers.find(p => p.id === config.providerId) : null;
+                                                                            return (
+                                                                                <div
+                                                                                    key={binding.id}
+                                                                                    className={`rounded-xl border ${borderColor} ${surfaceSoft} overflow-hidden`}
+                                                                                >
+                                                                                    <div className="flex items-center gap-3 px-3 py-2.5">
+                                                                                        <div className={`w-2 h-2 rounded-full shrink-0 ${connected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                                                                                        <div className="min-w-0 flex-1">
+                                                                                            <div className={`text-sm font-semibold truncate ${textMain}`}>{binding.name}</div>
+                                                                                            <div className={`text-[11px] truncate ${textMuted}`}>
+                                                                                                {bindingProvider?.name || '未知服务商'} · {binding.modelId}
+                                                                                            </div>
+                                                                                        </div>
+                                                                                        <span className={`shrink-0 text-[10px] px-2 py-1 rounded-lg ${connected ? (isDark ? 'bg-emerald-500/10 text-emerald-300' : 'bg-emerald-50 text-emerald-600') : (isDark ? 'bg-amber-500/10 text-amber-300' : 'bg-amber-50 text-amber-600')}`}>
+                                                                                            {connected ? '已接入' : '预留'}
+                                                                                        </span>
+                                                                                        {cfgKey && (
+                                                                                            <button
+                                                                                                onClick={() => toggleExpand(cfgKey)}
+                                                                                                className={`shrink-0 px-2 py-1 rounded-lg text-xs flex items-center gap-1 ${isExpanded ? (isDark ? 'bg-white/10 text-white' : 'bg-slate-200 text-gray-900') : `${textSub} ${isDark ? 'hover:bg-white/5 hover:text-white' : 'hover:bg-white hover:text-gray-900'}`}`}
+                                                                                                title="展开配置"
+                                                                                            >
+                                                                                                <Icons.Sliders size={12} />
+                                                                                                <span>配置</span>
+                                                                                            </button>
+                                                                                        )}
+                                                                                        <button
+                                                                                            onClick={() => handleRemoveModelServiceBinding(binding.id)}
+                                                                                            className={`shrink-0 p-1.5 rounded-lg ${textMuted} ${isDark ? 'hover:bg-red-500/10 hover:text-red-400' : 'hover:bg-red-50 hover:text-red-500'}`}
+                                                                                            title="移除"
+                                                                                        >
+                                                                                            <Icons.Trash2 size={13} />
+                                                                                        </button>
+                                                                                    </div>
+                                                                                    {isExpanded && def && config && (
+                                                                                        <div className={`border-t ${borderSoft} px-3 py-3 space-y-2.5 ${isDark ? 'bg-black/20' : 'bg-white'}`}>
+                                                                                            {(['providerId', 'modelId', 'key', 'baseUrl', 'endpoint'] as const).map(field => (
+                                                                                                <div key={field} className="flex items-center gap-3">
+                                                                                                    <label className={`w-20 text-[10px] font-semibold uppercase tracking-wider ${textSub} shrink-0 text-right`}>
+                                                                                                        {field === 'providerId' ? '服务商'
+                                                                                                            : field === 'modelId' ? 'Model ID'
+                                                                                                            : field === 'key' ? 'API Key'
+                                                                                                            : field === 'baseUrl' ? 'Base URL'
+                                                                                                            : 'Endpoint'}
+                                                                                                    </label>
+                                                                                                    {field === 'providerId' ? (
+                                                                                                        <select
+                                                                                                            value={config.providerId || ''}
+                                                                                                            onChange={e => updateConfig(cfgKey, 'providerId', e.target.value)}
+                                                                                                            className={`flex-1 px-3 py-2 text-xs ${inputBase}`}
+                                                                                                        >
+                                                                                                            <option value="">默认（使用全局或下方填写）</option>
+                                                                                                            {providers.map(p => (
+                                                                                                                <option key={p.id} value={p.id} disabled={!p.enabled}>
+                                                                                                                    {p.name}{!p.enabled ? '（已停用）' : ''}
+                                                                                                                </option>
+                                                                                                            ))}
+                                                                                                        </select>
+                                                                                                    ) : field === 'key' ? (
+                                                                                                        <div className="flex-1 relative">
+                                                                                                            <input
+                                                                                                                type={revealedKeys.has(cfgKey) ? 'text' : 'password'}
+                                                                                                                value={(config as any).key || ''}
+                                                                                                                onChange={e => updateConfig(cfgKey, 'key', e.target.value)}
+                                                                                                                className={`w-full px-3 py-2 pr-9 text-xs ${inputBase}`}
+                                                                                                                placeholder={cfgProvider?.apiKey ? `使用 ${cfgProvider.name} 的 Key` : (globalApiKey ? '使用全局 KEY' : 'sk-...')}
+                                                                                                                autoComplete="off"
+                                                                                                            />
+                                                                                                            <button
+                                                                                                                type="button"
+                                                                                                                onClick={() => toggleRevealKey(cfgKey)}
+                                                                                                                className={`absolute right-1.5 top-1/2 -translate-y-1/2 p-1.5 rounded-md ${textMuted} ${isDark ? 'hover:bg-white/5 hover:text-gray-200' : 'hover:bg-slate-200 hover:text-gray-700'}`}
+                                                                                                                title={revealedKeys.has(cfgKey) ? '隐藏 API Key' : '显示 API Key'}
+                                                                                                            >
+                                                                                                                {revealedKeys.has(cfgKey) ? <Icons.EyeOff size={13} /> : <Icons.Eye size={13} />}
+                                                                                                            </button>
+                                                                                                        </div>
+                                                                                                    ) : (
+                                                                                                        <input
+                                                                                                            type="text"
+                                                                                                            value={(config as any)[field] || ''}
+                                                                                                            onChange={e => updateConfig(cfgKey, field, e.target.value)}
+                                                                                                            className={`flex-1 px-3 py-2 text-xs ${inputBase}`}
+                                                                                                            placeholder={
+                                                                                                                field === 'modelId' ? def.id
+                                                                                                                : field === 'baseUrl' ? (cfgProvider?.baseUrl || globalBaseUrl || 'https://api.example.com')
+                                                                                                                : (def.defaultEndpoint || '/v1/chat/completions')
+                                                                                                            }
+                                                                                                        />
+                                                                                                    )}
+                                                                                                </div>
+                                                                                            ))}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
                                                     </div>
                                                 );
-                                            })}
+                                            })()}
                                         </div>
                                     )}
                                 </div>
@@ -970,63 +1156,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
                     </div>
                 </div>
 
-                {modelServiceBindings.filter(item => item.registryKey && expandedModels.has(item.registryKey)).map(binding => {
-                    const key = binding.registryKey!;
-                    const def = MODEL_REGISTRY[key];
-                    const config = configs[key] || getModelConfig(key);
-                    if (!def) return null;
-                    const provider = config.providerId ? providers.find(p => p.id === config.providerId) : null;
-                    return (
-                        <div key={key} className={`rounded-2xl border ${borderColor} ${surfaceCard} p-5 space-y-4`}>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <div className={`text-sm font-bold ${textMain}`}>{def.name}</div>
-                                    <div className={`text-xs ${textMuted}`}>{key}</div>
-                                </div>
-                                <button
-                                    onClick={() => toggleExpand(key)}
-                                    className={`p-2 rounded-lg ${textMuted} ${isDark ? 'hover:bg-white/5 hover:text-white' : 'hover:bg-slate-100 hover:text-gray-900'}`}
-                                >
-                                    <Icons.X size={14} />
-                                </button>
-                            </div>
-                            <div className="flex items-center gap-4">
-                                <label className={`w-24 text-xs font-medium uppercase ${textSub} shrink-0 text-right`}>服务商</label>
-                                <select
-                                    value={config.providerId || ''}
-                                    onChange={e => updateConfig(key, 'providerId', e.target.value)}
-                                    className={`flex-1 px-4 py-2.5 ${inputBase}`}
-                                >
-                                    <option value="">默认（使用全局或下方填写）</option>
-                                    {providers.map(p => (
-                                        <option key={p.id} value={p.id} disabled={!p.enabled}>
-                                            {p.name}{!p.enabled ? '（已停用）' : ''}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                            {(['modelId', 'key', 'baseUrl', 'endpoint'] as const).map(field => (
-                                <div key={field} className="flex items-center gap-4">
-                                    <label className={`w-24 text-xs font-medium uppercase ${textSub} shrink-0 text-right`}>
-                                        {field === 'modelId' ? 'Model ID' : field === 'key' ? 'API Key' : field === 'baseUrl' ? 'Base URL' : 'Endpoint'}
-                                    </label>
-                                    <input
-                                        type={field === 'key' ? 'password' : 'text'}
-                                        value={(config as any)[field] || ''}
-                                        onChange={e => updateConfig(key, field, e.target.value)}
-                                        className={`flex-1 px-4 py-2.5 ${inputBase}`}
-                                        placeholder={
-                                            field === 'modelId' ? def.id
-                                            : field === 'key' ? (provider?.apiKey ? `使用 ${provider.name} 的 Key` : (globalApiKey ? '使用全局 KEY' : 'sk-...'))
-                                            : field === 'baseUrl' ? (provider?.baseUrl || globalBaseUrl || 'https://api.example.com')
-                                            : (def.defaultEndpoint || '/v1/chat/completions')
-                                        }
-                                    />
-                                </div>
-                            ))}
-                        </div>
-                    );
-                })}
             </div>
         );
     };
@@ -1269,13 +1398,14 @@ interface ProviderDetailProps {
     testResult?: { ok: boolean; error?: string } | null;
     onRemoveModel: (modelId: string) => void;
     onFetchModels: () => void;
+    autoFetchStatus?: { loading?: boolean; ok?: boolean; error?: string; count?: number };
 }
 
 const ProviderDetail: React.FC<ProviderDetailProps> = ({
     provider, isDark, inputBase, ghostButton,
     textMain, textSub, textMuted, borderColor, borderSoft, surfaceSoft,
     onPatch, onDelete, onTest, testing, testResult,
-    onRemoveModel, onFetchModels,
+    onRemoveModel, onFetchModels, autoFetchStatus,
 }) => {
     const [showKey, setShowKey] = useState(false);
     const canFetch = !!provider.baseUrl && !!provider.apiKey;
@@ -1374,17 +1504,39 @@ const ProviderDetail: React.FC<ProviderDetailProps> = ({
                     <div className="flex items-center justify-between">
                         <div className="flex flex-col">
                             <label className={`text-[11px] font-semibold tracking-wider uppercase ${textSub}`}>模型</label>
-                            <span className={`text-[10px] mt-0.5 ${textMuted}`}>共 {provider.models.length} 个，去「模型管理」中按分类绑定</span>
+                            <span className={`text-[10px] mt-0.5 ${textMuted}`}>
+                                共 {provider.models.length} 个，去「模型管理」中按分类绑定。Base URL + API Key 填好后会自动尝试拉取。
+                            </span>
                         </div>
                         <button
                             onClick={onFetchModels}
                             disabled={!canFetch}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${ghostButton} hover:border-blue-500/50 disabled:opacity-50`}
-                            title={!canFetch ? '请先填写 Base URL 与 API Key' : '从服务商接口拉取模型列表'}
+                            title={!canFetch ? '请先填写 Base URL 与 API Key' : (provider.models.length > 0 ? '刷新模型列表' : '从服务商接口拉取模型列表')}
                         >
-                            <Icons.Download size={12} /> 获取模型
+                            {provider.models.length > 0
+                                ? <><Icons.RefreshCw size={12} /> 刷新模型</>
+                                : <><Icons.Download size={12} /> 获取模型</>}
                         </button>
                     </div>
+                    {autoFetchStatus?.loading && (
+                        <div className={`mt-2 flex items-center gap-1.5 text-[11px] ${textMuted}`}>
+                            <Icons.Loader2 size={11} className="animate-spin" />
+                            <span>正在自动获取模型...</span>
+                        </div>
+                    )}
+                    {autoFetchStatus && !autoFetchStatus.loading && autoFetchStatus.ok && autoFetchStatus.count ? (
+                        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-500">
+                            <Icons.Check size={11} />
+                            <span>已自动获取 {autoFetchStatus.count} 个模型</span>
+                        </div>
+                    ) : null}
+                    {autoFetchStatus && !autoFetchStatus.loading && autoFetchStatus.ok === false && autoFetchStatus.error && (
+                        <div className="mt-2 flex items-start gap-1.5 text-[11px] text-red-500">
+                            <Icons.AlertCircle size={11} className="mt-[1px] shrink-0" />
+                            <span className="break-words">自动获取失败：{autoFetchStatus.error}</span>
+                        </div>
+                    )}
                 </div>
 
                 {/* Notes */}

@@ -122,11 +122,24 @@ ipcMain.handle("tidecanvas-request-url", async (_event, payload) => {
       text,
     };
   } catch (error) {
+    // undici 的 "fetch failed" 一般会把真实原因放在 error.cause（含 code / errno / hostname）
+    const cause = error && error.cause ? error.cause : null;
+    const causeMsg = cause
+      ? `${cause.code || cause.errno || cause.name || ""} ${cause.message || ""} ${cause.hostname ? `(host: ${cause.hostname})` : ""}`.trim()
+      : "";
+    const baseMsg = error instanceof Error ? error.message : "Network request failed.";
+    const finalMsg = causeMsg ? `${baseMsg} | ${causeMsg}` : baseMsg;
+    console.error("[main] requestUrl failed:", {
+      url: payload && payload.url,
+      method: payload && payload.method,
+      message: baseMsg,
+      cause: cause ? { code: cause.code, errno: cause.errno, hostname: cause.hostname, message: cause.message } : null,
+    });
     return {
       ok: false,
       status: 0,
       statusText: error?.name === "AbortError" ? "AbortError" : "RequestError",
-      text: error instanceof Error ? error.message : "Network request failed.",
+      text: finalMsg,
     };
   } finally {
     clearTimeout(timeoutId);

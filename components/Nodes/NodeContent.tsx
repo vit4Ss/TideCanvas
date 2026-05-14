@@ -12,6 +12,7 @@ interface NodeContentProps {
   updateData: (id: string, updates: Partial<NodeData>) => void;
   onGenerate: (id: string) => void;
   onPanorama?: (id: string) => void;
+  onNineGrid?: (id: string, template: { key: string; label: string; prompt: string }) => void;
   selected?: boolean;
   showControls?: boolean;
   inputs?: string[];

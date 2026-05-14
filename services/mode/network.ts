@@ -160,6 +160,13 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
           const responseText = typeof response.text === 'function' ? await response.text() : response.text;
           clearTimeout(timeoutId);
 
+          console.log(`[Network] ⇐ ${response.status} ${response.statusText || ''}`, {
+              url,
+              method,
+              ok: response.ok,
+              bodyPreview: typeof responseText === 'string' ? responseText.slice(0, 500) : responseText,
+          });
+
           if (!response.ok) {
             const errText = responseText;
             let errMsg = errText;
@@ -173,6 +180,14 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
                     errMsg = jsonErr.fail_reason;
                 }
             } catch (e) {}
+            console.error('[Network] ✗ HTTP error', {
+                url,
+                method,
+                status: response.status,
+                statusText: response.statusText,
+                rawText: errText,
+                parsedMessage: errMsg,
+            });
             const error: any = new Error(`API Error ${response.status}: ${errMsg}`);
             if (response.status >= 400 && response.status < 500 && response.status !== 429 && response.status !== 408) {
                 error.isNonRetryable = true;
@@ -195,7 +210,7 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
           clearTimeout(timeoutId);
           lastError = error;
           if (error.name === 'AbortError') lastError = new Error(`Request timed out after ${timeout/1000}s`);
-          
+
           // 增强错误提示：Mixed Content / CORS
           if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
                const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
@@ -206,6 +221,18 @@ export const fetchThirdParty = async (url: string, method: string, body: any, co
                    lastError = new Error(`网络请求失败 (CORS 或网络问题)。请检查 API 地址是否允许跨域访问，或尝试使用 HTTPS。`);
                }
           }
+
+          console.error(`[Network] ✗ attempt ${attempt + 1}/${retries + 1} failed:`, {
+              url,
+              method,
+              errorName: error?.name,
+              errorMessage: error?.message,
+              causeCode: error?.cause?.code,
+              causeMessage: error?.cause?.message,
+              causeHostname: error?.cause?.hostname,
+              finalMessage: lastError?.message,
+              stack: error?.stack,
+          });
 
           if (attempt === retries || error.isNonRetryable) throw lastError;
           await new Promise(res => setTimeout(res, 1000 * (attempt + 1)));

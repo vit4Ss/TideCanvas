@@ -1576,7 +1576,8 @@ const CanvasWithSidebar: React.FC = () => {
 
   const handleGenerate = async (nodeId: string) => {
 
-    const node = nodes.find(n => n.id === nodeId);
+    // 用 workspaceStateRef 读最新节点，避免被旧闭包困住（在 setNodes 之后立即触发生成时尤其重要）
+    const node = workspaceStateRef.current.nodes.find(n => n.id === nodeId) || nodes.find(n => n.id === nodeId);
 
     if (!node) return;
 
@@ -1598,7 +1599,7 @@ const CanvasWithSidebar: React.FC = () => {
 
       if (node.type === NodeType.CREATIVE_DESC) {
 
-        const res = await generateCreativeDescription(node.prompt || '', node.model === 'TEXT_TO_VIDEO' ? 'VIDEO' : 'IMAGE');
+        const res = await generateCreativeDescription(node.prompt || '', node.model === 'TEXT_TO_VIDEO' ? 'VIDEO' : 'IMAGE', node.model);
 
         updateNodeData(nodeId, { optimizedPrompt: res, isLoading: false });
 
@@ -1694,9 +1695,20 @@ const CanvasWithSidebar: React.FC = () => {
 
       }
 
-    } catch (e) {
+    } catch (e: any) {
 
-      console.error(e);
+      console.error('[Generate] failed', {
+        nodeId,
+        nodeType: node.type,
+        model: node.model,
+        prompt: (node.prompt || '').slice(0, 200),
+        errorName: e?.name,
+        errorMessage: e?.message,
+        causeCode: e?.cause?.code,
+        causeHostname: e?.cause?.hostname,
+        causeMessage: e?.cause?.message,
+        stack: e?.stack,
+      });
 
       alert(`生成失败: ${(e as Error).message}`);
 
@@ -1704,6 +1716,46 @@ const CanvasWithSidebar: React.FC = () => {
 
     }
 
+  };
+
+  // 在源节点旁边新建一个 TEXT_TO_IMAGE 节点，写入 prompt 并立即触发生成
+  const handleGenerateNineGrid = (nodeId: string, template: { key: string; label: string; prompt: string }) => {
+      const source = workspaceStateRef.current.nodes.find(n => n.id === nodeId);
+      if (!source) return;
+
+      const nextIndex = (label: string) => {
+          const used = workspaceStateRef.current.nodes
+              .map(n => n.title)
+              .filter(title => title && title.startsWith(label))
+              .map(title => parseInt(title.slice(label.length).trim(), 10))
+              .filter(n => Number.isFinite(n));
+          return (used.length ? Math.max(...used) : 0) + 1;
+      };
+
+      const width = Math.max(source.width, 480);
+      const height = Math.max(source.height, 480);
+      const newNode: NodeData = {
+          id: generateId(),
+          type: NodeType.TEXT_TO_IMAGE,
+          x: source.x + source.width + 80,
+          y: source.y,
+          width,
+          height,
+          title: `${template.label} ${nextIndex(template.label)}`,
+          aspectRatio: '1:1',
+          model: source.model || '',
+          resolution: source.resolution || '1k',
+          count: 1,
+          prompt: template.prompt,
+      };
+
+      pushHistory();
+      setNodes(prev => [...prev, newNode]);
+      // 自动连线：源节点 → 新九宫格节点
+      setConnections(prev => [...prev, { id: generateId(), sourceId: source.id, targetId: newNode.id }]);
+      setSelectedNodeIds(new Set([newNode.id]));
+      // 等 setNodes 提交后再触发生成；handleGenerate 已改用 workspaceStateRef，能读到最新 node
+      setTimeout(() => handleGenerate(newNode.id), 50);
   };
 
   const handleGeneratePanorama = (nodeId: string) => {
@@ -3918,9 +3970,11 @@ const CanvasWithSidebar: React.FC = () => {
 
                             updateData={updateNodeData} 
 
-                            onGenerate={handleGenerate} 
+                            onGenerate={handleGenerate}
 
                             onPanorama={handleGeneratePanorama}
+
+                            onNineGrid={handleGenerateNineGrid}
 
                             selected={selectedNodeIds.has(node.id)}
 

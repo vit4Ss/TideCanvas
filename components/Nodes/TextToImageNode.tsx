@@ -16,6 +16,7 @@ interface TextToImageNodeProps {
   updateData: (id: string, updates: Partial<NodeData>) => void;
   onGenerate: (id: string) => void;
   onPanorama?: (id: string) => void;
+  onNineGrid?: (id: string, template: { key: string; label: string; prompt: string }) => void;
   selected?: boolean;
   showControls?: boolean;
   inputs?: string[];
@@ -177,7 +178,7 @@ const ImageSizeDropdown = ({
 };
 
 export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
-    data, updateData, onGenerate, onPanorama, selected, showControls, inputs = [], onMaximize, onDownload, onUpload, isDark = true, isSelecting, canvasScale = 1
+    data, updateData, onGenerate, onPanorama, onNineGrid, selected, showControls, inputs = [], onMaximize, onDownload, onUpload, isDark = true, isSelecting, canvasScale = 1
 }) => {
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [deferredInputs, setDeferredInputs] = useState(false);
@@ -186,6 +187,60 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
     const [isExpanded, setIsExpanded] = useState(false);
     const [isTitleEditing, setIsTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState(data.title);
+    const [progress, setProgress] = useState(0);
+    const [nineGridMenuOpen, setNineGridMenuOpen] = useState(false);
+
+    // 九宫格模板：选中后填入 prompt 并触发生成
+    const NINE_GRID_TEMPLATES: { key: string; label: string; prompt: string }[] = [
+        {
+            key: 'face',
+            label: '角色脸部三视图',
+            prompt: '一张 3x3 九宫格的角色脸部三视图参考表，九个面板分别展示角色脸部的：正面、3/4 左侧、左侧面、3/4 右侧、右侧面、仰视、俯视、微笑表情、严肃表情。同一角色，统一光线，五官特征一致，纯白背景，character face reference sheet, model sheet style',
+        },
+        {
+            key: 'product',
+            label: '产品三视图',
+            prompt: '一张 3x3 九宫格的产品三视图参考表，九个面板分别展示产品的：正面、背面、左侧面、右侧面、顶视图、底视图、3/4 透视、细节特写、爆炸图。统一光线和材质，纯白背景，product reference sheet, industrial design layout',
+        },
+        {
+            key: 'character',
+            label: '角色三视图',
+            prompt: '一张 3x3 九宫格的角色全身三视图参考表，九个面板分别展示角色：正面、3/4 左侧、左侧面、背面、右侧面、3/4 右侧、T-pose、行走姿态、动作姿态。同一角色，服装和比例一致，中性背景，character turnaround sheet, model sheet, full body reference',
+        },
+    ];
+
+    const applyNineGridTemplate = (tpl: { key: string; label: string; prompt: string }) => {
+        setNineGridMenuOpen(false);
+        if (onNineGrid) {
+            // 新建一个节点来承载三视图，避免覆盖当前节点的成果
+            onNineGrid(data.id, tpl);
+        } else {
+            // 兜底：直接在当前节点替换 prompt 并触发生成
+            updateData(data.id, { prompt: tpl.prompt, aspectRatio: '1:1' });
+            setTimeout(() => onGenerate(data.id), 50);
+        }
+    };
+
+    useEffect(() => {
+        if (!nineGridMenuOpen) return;
+        const close = () => setNineGridMenuOpen(false);
+        window.addEventListener('click', close);
+        return () => window.removeEventListener('click', close);
+    }, [nineGridMenuOpen]);
+
+    // 仿视频节点：生成时渐进式动画到 95%，结束时清零
+    useEffect(() => {
+        let interval: any;
+        if (data.isLoading) {
+            setProgress(0);
+            interval = setInterval(() => {
+                setProgress(prev => (prev >= 95 ? 95 : prev + Math.max(0.5, (95 - prev) / 20)));
+            }, 200);
+        } else {
+            setProgress(0);
+        }
+        return () => clearInterval(interval);
+    }, [data.isLoading]);
 
     const isSelectedAndStable = selected && !isSelecting;
     const requiresInputImage = data.type === NodeType.IMAGE_TO_IMAGE;
@@ -358,7 +413,32 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                 <ResultToolbarChip icon={Icons.LayoutGrid} label="全景" badge="NEW" onClick={() => onPanorama?.(data.id)} />
                 <ResultToolbarChip icon={Icons.RefreshCw} label="多角度" hasChevron />
                 <ResultToolbarChip icon={Icons.Sparkles} label="打光" />
-                <ResultToolbarChip icon={Icons.Frame} label="九宫格" hasChevron />
+                <div className="relative">
+                    <ResultToolbarChip
+                        icon={Icons.Frame}
+                        label="九宫格"
+                        hasChevron
+                        onClick={() => setNineGridMenuOpen(v => !v)}
+                    />
+                    {nineGridMenuOpen && (
+                        <div
+                            className={`absolute top-full left-0 mt-1 z-[80] min-w-[180px] rounded-xl border shadow-2xl py-1 ${isDark ? 'bg-[#1e1e1e] border-zinc-800' : 'bg-white border-gray-200'}`}
+                            onMouseDown={(e) => e.stopPropagation()}
+                        >
+                            {NINE_GRID_TEMPLATES.map(tpl => (
+                                <button
+                                    key={tpl.key}
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); applyNineGridTemplate(tpl); }}
+                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${isDark ? 'text-zinc-200 hover:bg-white/5' : 'text-gray-700 hover:bg-slate-50'}`}
+                                >
+                                    <Icons.Frame size={12} className={isDark ? 'text-zinc-500' : 'text-gray-400'} />
+                                    <span>{tpl.label}</span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
                 <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); updateData(data.id, { resolution: highestRes }); }}
@@ -514,10 +594,24 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                  </div>
              )}
              
-             {/* Loading Overlay */}
+             {/* Loading Overlay with Progress */}
              {data.isLoading && (
                  <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-20">
-                     <Icons.Loader2 size={32} className="text-blue-500 animate-spin mb-3" />
+                     <div className="relative w-16 h-16 mb-4">
+                         <svg className="w-full h-full -rotate-90" viewBox="0 0 64 64">
+                             <circle cx="32" cy="32" r="28" fill="none" stroke={isDark ? '#3f3f46' : '#e5e7eb'} strokeWidth="4" />
+                             <circle
+                                 cx="32" cy="32" r="28" fill="none"
+                                 stroke="#3b82f6" strokeWidth="4"
+                                 strokeLinecap="round"
+                                 strokeDasharray={`${progress * 1.76} 176`}
+                                 className="transition-all duration-300"
+                             />
+                         </svg>
+                         <div className="absolute inset-0 flex items-center justify-center">
+                             <span className="text-white font-bold text-sm tabular-nums">{Math.floor(progress)}%</span>
+                         </div>
+                     </div>
                      <span className="text-white/80 text-sm font-medium">生成中...</span>
                  </div>
              )}
