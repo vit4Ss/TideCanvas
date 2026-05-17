@@ -2,7 +2,8 @@
 import { MODEL_REGISTRY, getModelConfig, saveModelConfig, registerCustomModel, deleteModel, isCustomModel, getVisibleModels } from "./mode/config";
 import type { ModelConfig } from "./mode/config";
 import { IMAGE_HANDLERS, BananaHandler, BananaProHandler, Flux2Handler, Jimeng45Handler, MJHandler, ZimageHandler, QwenEditHandler, GptImageHandler } from "./mode/image/configurations";
-import { VIDEO_HANDLERS, Sora2Handler, GenericVideoHandler } from "./mode/video/configurations";
+import { VIDEO_HANDLERS, Sora2Handler, GenericVideoHandler, VPaiSeedanceHandler } from "./mode/video/configurations";
+import { isVPaiSeedanceModelId } from "./mode/video/vpai";
 import { constructUrl, fetchThirdParty } from "./mode/network";
 import { getPrimaryModelServiceBinding } from "./modelService";
 
@@ -122,7 +123,8 @@ export const generateCreativeDescription = async (input: string, mode: 'IMAGE' |
   const endpoint = config.endpoint || '/v1/chat/completions';
   const url = constructUrl(config.baseUrl, endpoint);
   console.log('[CreativeDesc] POST', url, 'model:', payload.model);
-  const res = await fetchThirdParty(url, 'POST', payload, config);
+  // 长文本生成给 3 分钟超时
+  const res = await fetchThirdParty(url, 'POST', payload, config, { timeout: 180000 });
   const content = res?.choices?.[0]?.message?.content
       ?? res?.choices?.[0]?.text
       ?? res?.content?.[0]?.text                  // Anthropic 风格
@@ -130,6 +132,75 @@ export const generateCreativeDescription = async (input: string, mode: 'IMAGE' |
   if (!content) {
       console.warn('[CreativeDesc] response had no recognizable content field', res);
       throw new Error('接口返回格式无法解析。请确认所选模型的接口兼容 /v1/chat/completions。');
+  }
+  return content;
+};
+
+const STORYBOARD_SYSTEM_PROMPT = `你是一名专业的 AI 动画视频分镜师。请根据用户给出的故事，生成专业的 AI 动画视频分镜脚本。
+
+要求：
+1. 风格为 Q版、搞笑、动画感
+2. 人物为《无畏契约》（Valorant）角色
+3. 分镜具有电影感和镜头感
+4. 每个镜头包含：
+   - 镜头编号
+   - 景别（远景/中景/特写）
+   - 画面内容
+   - 人物动作
+   - 表情
+   - 运镜方式
+   - 时长
+5. 镜头节奏轻松搞笑
+6. 每个镜头画面适合 AI 生成图片
+7. 保持角色一致性
+8. 使用动画电影风格
+9. 适合后续 AI 图生视频
+10. 输出格式清晰，按镜头依次给出
+
+请直接输出分镜脚本，不要附加任何说明。`;
+
+export const generateStoryboard = async (text: string, images: string[] = [], registryKey?: string): Promise<string> => {
+  let config: ModelConfig | null = null;
+  if (registryKey && registryKey.startsWith('枚举/TEXT/')) {
+      config = getModelConfig(registryKey);
+  }
+  if (!config || !config.key) {
+      const textBinding = getPrimaryModelServiceBinding('TEXT');
+      config = textBinding?.registryKey
+          ? getModelConfig(textBinding.registryKey)
+          : textBinding
+          ? { ...getModelConfig('BananaPro'), providerId: textBinding.providerId, modelId: textBinding.modelId }
+          : getModelConfig('BananaPro');
+  }
+  if (!config.key) {
+      throw new Error('未配置可用的文本模型 API Key。请在「服务商」中填入 API Key，或在「模型管理 → 配置」中给该模型补上 Key。');
+  }
+  // 有图片时用 content-array 格式（OpenAI vision 标准；多数代理网关支持）
+  const userContent: any = images.length > 0
+      ? [
+          { type: 'text', text },
+          ...images.map(src => ({ type: 'image_url', image_url: { url: src } })),
+        ]
+      : text;
+  const payload = {
+      model: config.modelId || 'gemini-2.0-flash-exp',
+      messages: [
+          { role: 'system', content: STORYBOARD_SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+      ],
+      temperature: 0.8,
+  };
+  const endpoint = config.endpoint || '/v1/chat/completions';
+  const url = constructUrl(config.baseUrl, endpoint);
+  console.log('[Storyboard] POST', url, 'model:', payload.model, 'imageCount:', images.length);
+  // 分镜脚本是长输出 + 复杂系统提示 + 可能的视觉处理，给 4 分钟
+  const res = await fetchThirdParty(url, 'POST', payload, config, { timeout: 240000 });
+  const content = res?.choices?.[0]?.message?.content
+      ?? res?.choices?.[0]?.text
+      ?? res?.content?.[0]?.text
+      ?? res?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!content) {
+      throw new Error('接口返回格式无法解析。请确认所选模型兼容 /v1/chat/completions。');
   }
   return content;
 };
@@ -189,7 +260,7 @@ export const generateVideo = async (
     if (isStartEndMode) realModelName = modelName.replace('_FL', '');
 
     let handler = VIDEO_HANDLERS[realModelName];
-    
+
     // Fallback for custom models
     if (!handler) {
         const def = MODEL_REGISTRY[realModelName];
@@ -201,15 +272,44 @@ export const generateVideo = async (
 
     if (!handler) handler = VIDEO_HANDLERS['Sora 2'];
 
+    // 智能路由：按模型名/端点判定，自定义"grok-*"或端点是 chat/completions 时强制走 Grok3Handler（chat-style 协议）
+    {
+        const cfg = getModelConfig(realModelName);
+        const nameLower = (realModelName || '').toLowerCase();
+        const endpointLower = (cfg.endpoint || '').toLowerCase();
+        const looksLikeGrok = nameLower.includes('grok') || endpointLower.includes('chat/completions');
+        if (looksLikeGrok) {
+            handler = VIDEO_HANDLERS['Grok video 3'];
+            console.log(`[Video Gen] Routing model "${realModelName}" to Grok3Handler (chat-style)`);
+        }
+
+        // V-PAI Seedance 强制路由：binding 经由「服务商→模型管理」生成的 registryKey 是
+        //   "枚举/VIDEO/Seedance 视频模型/doubao-seedance-xxx"，跟 VIDEO_HANDLERS 注册的静态 key 对不上，
+        //   会兜底到 GenericVideoHandler 发出 /v1/videos + 顶层 duration 字段，被火山下游 400 拒绝。
+        //   按 modelId 精确匹配 V-PAI 5 个 Seedance 模型，强制走 VPaiSeedanceHandler。
+        if (isVPaiSeedanceModelId(cfg.modelId)) {
+            handler = VPaiSeedanceHandler;
+            console.log(`[Video Gen] Routing model "${realModelName}" (modelId=${cfg.modelId}) to VPaiSeedanceHandler`);
+        }
+    }
+
     const config = getModelConfig(realModelName);
-    
+
     // Debug: Log video generation parameters
     console.log(`[Video Gen] Model: ${realModelName}, Input Images: ${inputImages.length}, Start-End Mode: ${isStartEndMode}, Prompt Optimize: ${promptOptimize}`);
     console.log(`[Video Gen] Config:`, { baseUrl: config.baseUrl, endpoint: config.endpoint, queryEndpoint: config.queryEndpoint, modelId: config.modelId, hasKey: !!config.key });
-    
+
+    // 前置校验：缺 modelId / key 直接给清晰错误，避免服务端返回神秘 400 "Field required"
+    if (!config.modelId || !String(config.modelId).trim()) {
+        throw new Error(`视频模型 "${realModelName}" 缺少 modelId 配置。请打开「模型管理 → 该模型 → 配置」，填入 modelId（如 grok-imagine、sora-2 等服务端识别的真实模型名）。`);
+    }
+    if (!config.key || !String(config.key).trim()) {
+        throw new Error(`视频模型 "${realModelName}" 缺少 API Key。请在「服务商」中填入 Key，或在该模型的配置里单独填入。`);
+    }
+
     try {
-        const result = await handler.generate(config, prompt, { 
-            aspectRatio, resolution, duration, inputImages, isStartEndMode, count, promptOptimize 
+        const result = await handler.generate(config, prompt, {
+            aspectRatio, resolution, duration, inputImages, isStartEndMode, count, promptOptimize
         });
         return Array.isArray(result) ? result : [result];
     } catch (e) {

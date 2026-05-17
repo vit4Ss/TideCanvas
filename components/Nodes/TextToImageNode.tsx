@@ -7,6 +7,8 @@ import { getModelConfig } from '../../services/geminiService';
 import { getCanvasModelOptions, CanvasModelOption } from '../../services/modelService';
 import { IMAGE_HANDLERS } from '../../services/mode/image/configurations';
 import { LocalEditableTitle, LocalCustomDropdown, LocalInputThumbnails, LocalMediaStack } from './Shared/LocalNodeComponents';
+import { CameraPanel } from './Shared/CameraPanel';
+import { CameraSelection, formatCameraPrompt } from '../../services/cameraPresets';
 
 const COMMON_RATIOS = ['自适应', '1:1', '9:16', '16:9', '3:4', '4:3', '3:2', '2:3', '4:5', '5:4', '21:9'];
 const COMMON_RESOLUTIONS = ['1k', '2k', '4k'];
@@ -20,9 +22,12 @@ interface TextToImageNodeProps {
   selected?: boolean;
   showControls?: boolean;
   inputs?: string[];
+  upstreamText?: string;
   onMaximize?: (id: string) => void;
   onDownload?: (id: string) => void;
   onUpload?: (nodeId: string) => void;
+  onAddToAssetLibrary?: (nodeId: string) => void | Promise<void>;
+  onSplitImageGrid?: (nodeId: string, presetRows?: number, presetCols?: number) => void | Promise<void>;
   isDark?: boolean;
   isSelecting?: boolean;
   canvasScale?: number;
@@ -178,8 +183,39 @@ const ImageSizeDropdown = ({
 };
 
 export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
-    data, updateData, onGenerate, onPanorama, onNineGrid, selected, showControls, inputs = [], onMaximize, onDownload, onUpload, isDark = true, isSelecting, canvasScale = 1
+    data, updateData, onGenerate, onPanorama, onNineGrid, selected, showControls, inputs = [], upstreamText, onMaximize, onDownload, onUpload, onAddToAssetLibrary, onSplitImageGrid, isDark = true, isSelecting, canvasScale = 1
 }) => {
+    const [savedToLibrary, setSavedToLibrary] = useState(false);
+    const [librarySaving, setLibrarySaving] = useState(false);
+    const handleAddToLibrary = useCallback(async () => {
+        if (!onAddToAssetLibrary || librarySaving) return;
+        setLibrarySaving(true);
+        try {
+            await Promise.resolve(onAddToAssetLibrary(data.id));
+            setSavedToLibrary(true);
+            setTimeout(() => setSavedToLibrary(false), 1500);
+        } catch (e) {
+            console.error('Add to library failed:', e);
+        } finally {
+            setLibrarySaving(false);
+        }
+    }, [data.id, onAddToAssetLibrary, librarySaving]);
+    const [cameraOpen, setCameraOpen] = useState<'panel' | 'modal' | null>(null);
+
+    const handleCameraApply = useCallback((sel: CameraSelection) => {
+        const snippet = formatCameraPrompt(sel);
+        const current = (data.prompt || '').trim();
+        const next = current ? (current.endsWith('.') || current.endsWith('，') || current.endsWith(',') || current.endsWith('。') ? `${current} ${snippet}` : `${current}. ${snippet}`) : snippet;
+        updateData(data.id, { prompt: next });
+        setCameraOpen(null);
+    }, [data.id, data.prompt, updateData]);
+
+    const useUpstreamText = useCallback(() => {
+        const text = (upstreamText || '').trim();
+        if (!text) return;
+        updateData(data.id, { prompt: text });
+        setTimeout(() => onGenerate(data.id), 50);
+    }, [upstreamText, data.id, updateData, onGenerate]);
     const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
     const [deferredInputs, setDeferredInputs] = useState(false);
     const [isConfigured, setIsConfigured] = useState(true);
@@ -189,6 +225,16 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
     const [titleDraft, setTitleDraft] = useState(data.title);
     const [progress, setProgress] = useState(0);
     const [nineGridMenuOpen, setNineGridMenuOpen] = useState(false);
+    const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+
+    const SPLIT_PRESETS: { label: string; rows: number; cols: number }[] = [
+        { label: '2×2 (4 格)', rows: 2, cols: 2 },
+        { label: '3×3 (9 格)', rows: 3, cols: 3 },
+        { label: '4×4 (16 格)', rows: 4, cols: 4 },
+        { label: '4×8 (32 格)', rows: 4, cols: 8 },
+        { label: '8×4 (32 格)', rows: 8, cols: 4 },
+        { label: '6×6 (36 格)', rows: 6, cols: 6 },
+    ];
 
     // 九宫格模板：选中后填入 prompt 并触发生成
     const NINE_GRID_TEMPLATES: { key: string; label: string; prompt: string }[] = [
@@ -205,7 +251,7 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         {
             key: 'character',
             label: '角色三视图',
-            prompt: '一张 3x3 九宫格的角色全身三视图参考表，九个面板分别展示角色：正面、3/4 左侧、左侧面、背面、右侧面、3/4 右侧、T-pose、行走姿态、动作姿态。同一角色，服装和比例一致，中性背景，character turnaround sheet, model sheet, full body reference',
+            prompt: '用于AI视频生成的角色三视图，正面、侧面、背面，全身展示，角色一致性，统一发型，统一服装，电影感，人物设定图，参考图，标准站姿，白色背景',
         },
     ];
 
@@ -227,6 +273,13 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         window.addEventListener('click', close);
         return () => window.removeEventListener('click', close);
     }, [nineGridMenuOpen]);
+
+    useEffect(() => {
+        if (!splitMenuOpen) return;
+        const close = () => setSplitMenuOpen(false);
+        window.addEventListener('click', close);
+        return () => window.removeEventListener('click', close);
+    }, [splitMenuOpen]);
 
     // 仿视频节点：生成时渐进式动画到 95%，结束时清零
     useEffect(() => {
@@ -347,15 +400,21 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
 
     const containerBg = isDark ? 'bg-[#1a1a1a]' : 'bg-white';
     const containerBorder = selected
-        ? (isDark ? 'border-zinc-500 ring-1 ring-zinc-600/40' : 'border-gray-300 ring-1 ring-gray-200/60')
+        ? (isDark ? 'border-blue-400/40 ring-2 ring-blue-500/20' : 'border-blue-400/60 ring-2 ring-blue-100')
         : (isDark ? 'border-zinc-700/50' : 'border-gray-200');
-    const controlPanelBg = isDark ? 'bg-[#1a1a1a]/95 backdrop-blur-xl border-zinc-700/50' : 'bg-white/95 backdrop-blur-xl border-gray-200 shadow-xl';
+    const controlPanelBg = isDark
+        ? 'bg-[#1c1c1c]/85 backdrop-blur-xl border-white/[0.06] glass-card'
+        : 'bg-white/85 backdrop-blur-xl border-zinc-200/70 glass-card';
     const titleColor = isDark ? 'text-zinc-200' : 'text-gray-700';
     const subtleText = isDark ? 'text-zinc-500' : 'text-gray-400';
-    const chipBtn = isDark ? 'bg-zinc-800/80 hover:bg-zinc-700 border-zinc-700 text-zinc-200' : 'bg-white hover:bg-gray-50 border-gray-200 text-gray-700 shadow-sm';
-    const ghostIconBtn = isDark ? 'text-zinc-400 hover:text-white hover:bg-white/10 hover:shadow-md hover:shadow-black/20' : 'text-gray-500 hover:text-gray-900 hover:bg-white hover:shadow-md hover:shadow-gray-200/70';
-    const sendBtnEnabled = isDark ? 'bg-zinc-100 text-zinc-900 hover:bg-white' : 'bg-zinc-900 text-white hover:bg-zinc-800';
-    const sendBtnDisabled = isDark ? 'bg-zinc-700 text-zinc-500 cursor-not-allowed' : 'bg-gray-200 text-gray-400 cursor-not-allowed';
+    const chipBtn = isDark
+        ? 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-zinc-200 transition-colors duration-200'
+        : 'bg-white/80 hover:bg-white border-zinc-200/70 text-gray-700 shadow-sm transition-colors duration-200';
+    const ghostIconBtn = isDark
+        ? 'text-zinc-400 hover:text-white hover:bg-white/[0.08] transition-colors duration-200'
+        : 'text-gray-500 hover:text-gray-900 hover:bg-zinc-100/70 transition-colors duration-200';
+    const sendBtnEnabled = 'bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-[0_4px_16px_-2px_rgba(59,130,246,0.45),inset_0_1px_0_rgba(255,255,255,0.25)] hover:shadow-[0_6px_24px_-2px_rgba(59,130,246,0.55),inset_0_1px_0_rgba(255,255,255,0.3)] hover:-translate-y-px hover:animate-pulse-ring transition-all duration-200 ease-organic';
+    const sendBtnDisabled = isDark ? 'bg-white/[0.06] text-zinc-600 cursor-not-allowed' : 'bg-zinc-100 text-zinc-400 cursor-not-allowed';
     const controlPanelScale = 1 / Math.max(canvasScale, 0.1);
     const titleScale = 1 / Math.max(canvasScale, 0.1);
     const highestRes = supportedResolutions[supportedResolutions.length - 1];
@@ -388,12 +447,12 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onClick?.(); }}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all ${ghostIconBtn}`}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all duration-150 active:scale-[0.97] ${ghostIconBtn}`}
         >
             {Icon && <Icon size={14} />}
             <span className="whitespace-nowrap">{label}</span>
             {badge && (
-                <span className="inline-flex h-4 items-center rounded px-1 text-[9px] font-bold uppercase bg-blue-100 text-blue-600">
+                <span className="inline-flex h-4 items-center rounded px-1.5 text-[9px] font-bold uppercase bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm shadow-blue-500/30">
                     {badge}
                 </span>
             )}
@@ -406,23 +465,29 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         {/* Above-Node: Result toolbar (top-center, when image exists) */}
         {isSelectedAndStable && hasResult && (
             <div
-                className={`absolute left-1/2 z-[60] flex items-center gap-0.5 rounded-2xl border px-1.5 py-1 shadow-xl pointer-events-auto whitespace-nowrap ${chipBtn}`}
+                className={`absolute left-1/2 z-[60] flex items-center gap-0.5 rounded-2xl border px-1.5 py-1 pointer-events-auto whitespace-nowrap transition-all duration-200 ease-organic glass-card ${
+                    isDark
+                        ? 'bg-[#1c1c1c]/85 backdrop-blur-xl border-white/[0.08]'
+                        : 'bg-white/85 backdrop-blur-xl border-zinc-200/70'
+                }`}
                 style={{ top: -88 * titleScale, transform: `translateX(-50%) scale(${titleScale})`, transformOrigin: 'bottom center' }}
                 onMouseDown={(e) => e.stopPropagation()}
             >
                 <ResultToolbarChip icon={Icons.LayoutGrid} label="全景" badge="NEW" onClick={() => onPanorama?.(data.id)} />
-                <ResultToolbarChip icon={Icons.RefreshCw} label="多角度" hasChevron />
-                <ResultToolbarChip icon={Icons.Sparkles} label="打光" />
                 <div className="relative">
                     <ResultToolbarChip
                         icon={Icons.Frame}
-                        label="九宫格"
+                        label="三视图"
                         hasChevron
                         onClick={() => setNineGridMenuOpen(v => !v)}
                     />
                     {nineGridMenuOpen && (
                         <div
-                            className={`absolute top-full left-0 mt-1 z-[80] min-w-[180px] rounded-xl border shadow-2xl py-1 ${isDark ? 'bg-[#1e1e1e] border-zinc-800' : 'bg-white border-gray-200'}`}
+                            className={`absolute top-full left-0 mt-1.5 z-[80] min-w-[200px] rounded-xl border py-1 elev-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-organic ${
+                                isDark
+                                    ? 'bg-[#1c1c1c]/95 backdrop-blur-xl border-white/[0.08]'
+                                    : 'bg-white/95 backdrop-blur-xl border-zinc-200/70'
+                            }`}
                             onMouseDown={(e) => e.stopPropagation()}
                         >
                             {NINE_GRID_TEMPLATES.map(tpl => (
@@ -430,7 +495,7 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                                     key={tpl.key}
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); applyNineGridTemplate(tpl); }}
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${isDark ? 'text-zinc-200 hover:bg-white/5' : 'text-gray-700 hover:bg-slate-50'}`}
+                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${isDark ? 'text-zinc-200 hover:bg-white/[0.06]' : 'text-gray-700 hover:bg-zinc-100/70'}`}
                                 >
                                     <Icons.Frame size={12} className={isDark ? 'text-zinc-500' : 'text-gray-400'} />
                                     <span>{tpl.label}</span>
@@ -439,18 +504,54 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                         </div>
                     )}
                 </div>
-                <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); updateData(data.id, { resolution: highestRes }); }}
-                    className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all ${ghostIconBtn}`}
-                >
-                    <span className={`inline-flex h-3.5 items-center rounded-sm border px-0.5 text-[9px] font-bold ${isDark ? 'border-zinc-400 text-zinc-300' : 'border-gray-500 text-gray-600'}`}>HD</span>
-                    <span className="whitespace-nowrap">高清</span>
-                    <Icons.ChevronRight size={11} className={`rotate-90 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
-                </button>
-                <ResultToolbarChip icon={Icons.Scissors} label="宫格切分" hasChevron />
 
-                <div className={`mx-1 h-5 w-px ${isDark ? 'bg-white/10' : 'bg-gray-200'}`} />
+                <ResultToolbarChip
+                    icon={savedToLibrary ? Icons.Check : Icons.Images}
+                    label={savedToLibrary ? '已加入' : '加入素材库'}
+                    onClick={handleAddToLibrary}
+                />
+
+                <div className="relative">
+                    <ResultToolbarChip
+                        icon={Icons.Scissors}
+                        label="拆分网格"
+                        hasChevron
+                        onClick={() => setSplitMenuOpen(v => !v)}
+                    />
+                    {splitMenuOpen && (
+                        <div
+                            className={`absolute top-full left-0 mt-1.5 z-[80] min-w-[160px] rounded-xl border py-1 elev-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-organic ${
+                                isDark
+                                    ? 'bg-[#1c1c1c]/95 backdrop-blur-xl border-white/[0.08]'
+                                    : 'bg-white/95 backdrop-blur-xl border-zinc-200/70'
+                            }`}
+                            onMouseDown={(e) => e.stopPropagation()}
+                        >
+                            {SPLIT_PRESETS.map(p => (
+                                <button
+                                    key={p.label}
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); setSplitMenuOpen(false); onSplitImageGrid?.(data.id, p.rows, p.cols); }}
+                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${isDark ? 'text-zinc-200 hover:bg-white/[0.06]' : 'text-gray-700 hover:bg-zinc-100/70'}`}
+                                >
+                                    <Icons.Frame size={12} className={isDark ? 'text-zinc-500' : 'text-gray-400'} />
+                                    <span>{p.label}</span>
+                                </button>
+                            ))}
+                            <div className={`my-1 h-px ${isDark ? 'bg-white/[0.06]' : 'bg-zinc-100'}`} />
+                            <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setSplitMenuOpen(false); onSplitImageGrid?.(data.id); }}
+                                className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 font-medium transition-colors ${isDark ? 'text-blue-300 hover:bg-blue-500/15' : 'text-blue-700 hover:bg-blue-50'}`}
+                            >
+                                <Icons.Sliders size={12} />
+                                <span>自定义…</span>
+                            </button>
+                        </div>
+                    )}
+                </div>
+
+                <div className={`mx-1.5 h-5 w-px ${isDark ? 'bg-white/[0.08]' : 'bg-zinc-200'}`} />
 
                 <button
                     type="button"
@@ -524,7 +625,11 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         {isSelectedAndStable && !hasResult && (
             <button
                 type="button"
-                className={`absolute left-1/2 z-[60] flex h-9 items-center gap-1.5 rounded-full border px-3.5 text-xs font-medium transition-all pointer-events-auto ${chipBtn}`}
+                className={`absolute left-1/2 z-[60] flex h-9 items-center gap-1.5 rounded-full border px-4 text-xs font-medium pointer-events-auto active:scale-[0.97] hover-lift elev-1 ${
+                    isDark
+                        ? 'bg-[#1c1c1c]/85 backdrop-blur-xl border-white/[0.08] text-zinc-200 hover:bg-[#222]/85'
+                        : 'bg-white/85 backdrop-blur-xl border-zinc-200/70 text-gray-700 hover:bg-white'
+                }`}
                 style={{ top: -48 * titleScale, transform: `translateX(-50%) scale(${titleScale})`, transformOrigin: 'bottom center' }}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => { e.stopPropagation(); onUpload?.(data.id); }}
@@ -548,18 +653,18 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
             </button>
         )}
 
-        <div className={`w-full h-full relative rounded-2xl border ${containerBorder} ${containerBg} ${data.isStackOpen ? 'overflow-visible' : 'overflow-hidden'} shadow-xl group transition-[width,height,border-radius,box-shadow,border-color,background-color] transition-node-resize`}>
+        <div className={`w-full h-full relative rounded-3xl border ${containerBorder} ${containerBg} ${data.isStackOpen ? 'overflow-visible' : 'overflow-hidden'} ${isDark ? 'shadow-2xl shadow-black/40' : 'shadow-2xl shadow-zinc-300/40'} group transition-[width,height,border-radius,box-shadow,border-color,background-color] transition-node-resize`}>
              {hasResult ? (
                  <>
                      <LocalMediaStack data={data} updateData={updateData} currentSrc={data.imageSrc} onMaximize={onMaximize} isDark={isDark} selected={selected} />
 
                      {/* Persistent share/download chip (top-right inside image) */}
-                     <div className="absolute top-2 right-2 z-10 pointer-events-auto">
+                     <div className="absolute top-2.5 right-2.5 z-10 pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                          <button
                              type="button"
                              title="下载"
                              onClick={(e) => { e.stopPropagation(); onDownload?.(data.id); }}
-                             className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-black/55 hover:bg-black/70 backdrop-blur-md text-white/90 hover:text-white transition-all shadow-lg"
+                             className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-black/40 hover:bg-black/60 backdrop-blur-lg text-white/85 hover:text-white transition-all shadow-lg shadow-black/30 active:scale-[0.94]"
                          >
                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                  <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
@@ -570,13 +675,14 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                      </div>
                  </>
              ) : (
-                 <div className={`w-full h-full flex flex-col items-center justify-center ${subtleText}`}>
-                     <Icons.Image size={48} strokeWidth={1.5} className={isDark ? 'text-zinc-700' : 'text-gray-300'} />
-                     <div className="mt-6 flex flex-col items-start gap-1.5 text-xs">
-                         <span className={isDark ? 'text-zinc-500' : 'text-gray-400'}>尝试:</span>
+                 <div className={`w-full h-full flex flex-col items-center justify-center gap-5 ${subtleText} animate-in fade-in duration-200`}>
+                     <div className={`relative w-16 h-16 rounded-2xl flex items-center justify-center ${isDark ? 'bg-white/[0.03] border border-white/[0.05]' : 'bg-zinc-100/70 border border-zinc-200/70'}`}>
+                         <Icons.Image size={28} strokeWidth={1.5} className={isDark ? 'text-zinc-600' : 'text-zinc-400'} />
+                     </div>
+                     <div className="flex flex-col items-center gap-1.5 text-xs">
                          <button
                              type="button"
-                             className={`flex items-center gap-1.5 transition-colors ${isDark ? 'text-zinc-400 hover:text-white' : 'text-gray-500 hover:text-gray-900'}`}
+                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border transition-all duration-200 active:scale-[0.97] ${isDark ? 'border-white/[0.06] text-zinc-300 hover:bg-white/[0.04] hover:text-white' : 'border-zinc-200/70 text-gray-600 hover:bg-white hover:text-gray-900'}`}
                              onClick={(e) => { e.stopPropagation(); onUpload?.(data.id); }}
                          >
                              <Icons.Upload size={13} />
@@ -584,10 +690,10 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                          </button>
                          <button
                              type="button"
-                             className={`flex items-center gap-1.5 transition-colors ${isDark ? 'text-zinc-400 hover:text-white' : 'text-gray-500 hover:text-gray-900'}`}
+                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border transition-all duration-200 active:scale-[0.97] ${isDark ? 'border-white/[0.06] text-zinc-300 hover:bg-white/[0.04] hover:text-white' : 'border-zinc-200/70 text-gray-600 hover:bg-white hover:text-gray-900'}`}
                              onClick={(e) => { e.stopPropagation(); updateData(data.id, { resolution: highestRes }); }}
                          >
-                             <span className={`inline-flex h-3.5 w-5 items-center justify-center rounded-sm border text-[9px] font-bold ${isDark ? 'border-zinc-500 text-zinc-400' : 'border-gray-400 text-gray-500'}`}>HD</span>
+                             <span className={`inline-flex h-3.5 w-5 items-center justify-center rounded-sm border text-[9px] font-bold ${isDark ? 'border-zinc-500 text-zinc-300' : 'border-zinc-400 text-zinc-500'}`}>HD</span>
                              <span>图片高清</span>
                          </button>
                      </div>
@@ -596,39 +702,70 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
              
              {/* Loading Overlay with Progress */}
              {data.isLoading && (
-                 <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-20">
-                     <div className="relative w-16 h-16 mb-4">
+                 <div className="absolute inset-0 bg-black/50 backdrop-blur-md flex flex-col items-center justify-center gap-4 z-20 animate-in fade-in duration-200">
+                     <div className="relative w-16 h-16">
                          <svg className="w-full h-full -rotate-90" viewBox="0 0 64 64">
-                             <circle cx="32" cy="32" r="28" fill="none" stroke={isDark ? '#3f3f46' : '#e5e7eb'} strokeWidth="4" />
+                             <circle cx="32" cy="32" r="28" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="4" />
                              <circle
                                  cx="32" cy="32" r="28" fill="none"
-                                 stroke="#3b82f6" strokeWidth="4"
+                                 stroke="url(#progressGrad)" strokeWidth="4"
                                  strokeLinecap="round"
                                  strokeDasharray={`${progress * 1.76} 176`}
                                  className="transition-all duration-300"
                              />
+                             <defs>
+                                 <linearGradient id="progressGrad" x1="0" y1="0" x2="1" y2="1">
+                                     <stop offset="0%" stopColor="#60a5fa" />
+                                     <stop offset="100%" stopColor="#6366f1" />
+                                 </linearGradient>
+                             </defs>
                          </svg>
                          <div className="absolute inset-0 flex items-center justify-center">
-                             <span className="text-white font-bold text-sm tabular-nums">{Math.floor(progress)}%</span>
+                             <span className="text-white font-semibold text-sm tabular-nums">{Math.floor(progress)}%</span>
                          </div>
                      </div>
-                     <span className="text-white/80 text-sm font-medium">生成中...</span>
+                     <span className="text-white/90 text-[13px] font-medium tracking-wide">生成中…</span>
                  </div>
              )}
         </div>
 
         {/* Control Panel */}
-        {isSelectedAndStable && showControls && !hasResult && (
+        {isSelectedAndStable && showControls && (
             <div
                 className="absolute top-full left-1/2 w-[640px] min-w-[640px] max-w-[640px] pt-4 z-[70] pointer-events-auto"
                 style={{ transform: `translateX(-50%) scale(${controlPanelScale})`, transformOrigin: 'top center' }}
                 onMouseDown={(e) => e.stopPropagation()}
             >
-                 <div className={`${controlPanelBg} rounded-2xl p-3 flex flex-col gap-2.5 border`}>
+                 <div className={`relative ${controlPanelBg} rounded-3xl p-3.5 flex flex-col gap-2.5 border transition-all duration-200`}>
+                      {cameraOpen === 'panel' && (
+                          <div className="absolute left-3 right-3 top-3 z-[90] animate-in fade-in slide-in-from-bottom-2 duration-150">
+                              <CameraPanel
+                                  isDark={isDark}
+                                  onClose={() => setCameraOpen(null)}
+                                  onApply={handleCameraApply}
+                              />
+                          </div>
+                      )}
                       {/* Top action row: Expand only (风格/标记/聚焦 暂时隐藏) */}
                       <div className="flex items-center gap-2">
                           {inputs.length > 0 && (
                               <LocalInputThumbnails inputs={inputs} ready={deferredInputs} isDark={isDark} compact />
+                          )}
+                          {upstreamText && (
+                              <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); useUpstreamText(); }}
+                                  disabled={data.isLoading || !isConfigured || (requiresInputImage && !hasInputImage)}
+                                  title={`使用文本节点内容生成：\n${upstreamText.length > 200 ? upstreamText.slice(0, 200) + '…' : upstreamText}`}
+                                  className={`relative w-[36px] h-[36px] flex-shrink-0 border rounded-lg overflow-hidden shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'border-zinc-700 bg-black/40 hover:border-blue-500/60 hover:bg-blue-500/10' : 'border-gray-300 bg-gray-100 hover:border-blue-400 hover:bg-blue-50'}`}
+                              >
+                                  <div className={`absolute inset-0 px-1 py-1 text-[7px] leading-[8px] overflow-hidden ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                                      {upstreamText.slice(0, 60)}
+                                  </div>
+                                  <div className={`absolute inset-0 ${isDark ? 'bg-gradient-to-t from-black/80 via-black/40 to-transparent' : 'bg-gradient-to-t from-white/90 via-white/40 to-transparent'} pointer-events-none`} />
+                                  <Icons.FileText size={12} className={`absolute bottom-0.5 right-0.5 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />
+                                  <div className="absolute top-0 left-0 bg-blue-500/90 backdrop-blur-sm text-white text-[8px] font-bold px-1 rounded-br z-10">T</div>
+                              </button>
                           )}
                           <div className="flex-1" />
                           <IconBtn icon={Icons.Maximize2} title="展开" onClick={() => setIsExpanded(true)} size={15} />
@@ -653,8 +790,8 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                                   isOpen={activeDropdown === 'model'} 
                                   onToggle={() => setActiveDropdown(activeDropdown === 'model' ? null : 'model')} 
                                   onClose={() => setActiveDropdown(null)} 
-                                  align="left" 
-                                  width="w-[140px]" 
+                                  align="left"
+                                  width="w-[220px]"
                                   isDark={isDark} 
                               />
                           </div>
@@ -674,8 +811,8 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                           </div>
                           <button
                               type="button"
-                              className={`shrink-0 inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-medium transition-all ${ghostIconBtn}`}
-                              onClick={(e) => e.stopPropagation()}
+                              className={`shrink-0 inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-medium transition-all ${cameraOpen === 'panel' ? (isDark ? 'bg-blue-500/15 text-blue-400' : 'bg-blue-50 text-blue-600') : ghostIconBtn}`}
+                              onClick={(e) => { e.stopPropagation(); setCameraOpen(cameraOpen === 'panel' ? null : 'panel'); }}
                               title="摄像机"
                           >
                               <Icons.Camera size={14} />
@@ -685,8 +822,8 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                           <div className="flex-1" />
 
                           <div className="shrink-0">
-                              <LocalCustomDropdown 
-                                  options={['1张', '2张', '3张', '4张']} 
+                              <LocalCustomDropdown
+                                  options={['1张', '2张', '3张', '4张', '6张', '8张', '12张', '16张', '24张', '32张']}
                                   value={`${data.count || 1}张`} 
                                   onChange={(val: any) => updateData(data.id, { count: parseInt(String(val), 10) || 1 })} 
                                   isOpen={activeDropdown === 'count'} 
@@ -727,17 +864,42 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                 onMouseDown={(e) => { if (e.target === e.currentTarget) setIsExpanded(false); }}
             >
                 <div
-                    className={`relative flex w-[min(900px,90vw)] max-h-[80vh] flex-col gap-3 rounded-2xl border p-4 shadow-2xl ${
-                        isDark ? 'bg-[#1a1a1a]/95 border-zinc-700/50 backdrop-blur-xl' : 'bg-white border-gray-200'
+                    className={`relative flex w-[min(900px,90vw)] max-h-[80vh] flex-col gap-3 rounded-3xl border p-5 shadow-2xl ${
+                        isDark ? 'bg-[#1c1c1c]/90 border-white/[0.06] backdrop-blur-2xl shadow-black/60' : 'bg-white/90 border-zinc-200/70 backdrop-blur-2xl shadow-zinc-400/30'
                     }`}
                     style={{ height: 'min(620px, 80vh)' }}
                     onMouseDown={(e) => e.stopPropagation()}
                 >
+                    {cameraOpen === 'modal' && (
+                        <div className="absolute left-4 right-4 top-16 z-[210] animate-in fade-in slide-in-from-bottom-2 duration-150">
+                            <CameraPanel
+                                isDark={isDark}
+                                onClose={() => setCameraOpen(null)}
+                                onApply={(sel) => { handleCameraApply(sel); }}
+                            />
+                        </div>
+                    )}
                     {/* Top row: chips + collapse */}
                     <div className="flex items-center gap-2">
                         <ActionChip icon={Icons.Layers} label="风格" />
                         <ActionChip icon={Icons.MapPin} label="标记" />
                         <ActionChip icon={Icons.Scan} label="聚焦" />
+                        {upstreamText && (
+                            <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); useUpstreamText(); setIsExpanded(false); }}
+                                disabled={data.isLoading || !isConfigured || (requiresInputImage && !hasInputImage)}
+                                title={`使用文本节点内容生成：\n${upstreamText.length > 200 ? upstreamText.slice(0, 200) + '…' : upstreamText}`}
+                                className={`relative w-[48px] h-[48px] flex-shrink-0 border rounded-lg overflow-hidden shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'border-zinc-700 bg-black/40 hover:border-blue-500/60 hover:bg-blue-500/10' : 'border-gray-300 bg-gray-100 hover:border-blue-400 hover:bg-blue-50'}`}
+                            >
+                                <div className={`absolute inset-0 px-1.5 py-1.5 text-[8px] leading-[10px] overflow-hidden text-left ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                                    {upstreamText.slice(0, 80)}
+                                </div>
+                                <div className={`absolute inset-0 ${isDark ? 'bg-gradient-to-t from-black/80 via-black/40 to-transparent' : 'bg-gradient-to-t from-white/90 via-white/40 to-transparent'} pointer-events-none`} />
+                                <Icons.FileText size={14} className={`absolute bottom-1 right-1 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />
+                                <div className="absolute top-0 left-0 bg-blue-500/90 backdrop-blur-sm text-white text-[9px] font-bold px-1.5 rounded-br z-10">T</div>
+                            </button>
+                        )}
                         <div className="flex-1" />
                         <button
                             type="button"
@@ -795,8 +957,8 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
                         </div>
                         <button
                             type="button"
-                            className={`shrink-0 inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-medium transition-all ${ghostIconBtn}`}
-                            onClick={(e) => e.stopPropagation()}
+                            className={`shrink-0 inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-medium transition-all ${cameraOpen === 'modal' ? (isDark ? 'bg-blue-500/15 text-blue-400' : 'bg-blue-50 text-blue-600') : ghostIconBtn}`}
+                            onClick={(e) => { e.stopPropagation(); setCameraOpen(cameraOpen === 'modal' ? null : 'modal'); }}
                             title="摄像机"
                         >
                             <Icons.Camera size={14} />

@@ -98,7 +98,27 @@ export const MODEL_REGISTRY: Record<string, ModelDef> = {
   },
   
   'Grok video 3': { id: 'grok-video-3', name: 'Grok Video', type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/v1/video/create', defaultQueryEndpoint: '/v1/video/query' },
-  
+
+  // 青栀 AI Veo 系列（鉴权用裸 key 不加 Bearer，端点带 /veo 前缀；网关只代理 Veo）
+  'Veo 2 (青栀)':                  { id: 'veo2',                  name: 'Veo 2 · Fast 默认',           type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 2 Fast (青栀)':             { id: 'veo2-fast',             name: 'Veo 2 · Fast',                type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 2 Fast Frames (青栀)':      { id: 'veo2-fast-frames',      name: 'Veo 2 · Fast 首尾帧',         type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 2 Fast Components (青栀)':  { id: 'veo2-fast-components',  name: 'Veo 2 · Fast 多图素材合成',    type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 2 Pro (青栀)':              { id: 'veo2-pro',              name: 'Veo 2 · Pro 高质量',          type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3 (青栀)':                  { id: 'veo3',                  name: 'Veo 3 · Fast 带音频',         type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3 Fast (青栀)':             { id: 'veo3-fast',             name: 'Veo 3 · Fast 带音频',         type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3 Pro (青栀)':              { id: 'veo3-pro',              name: 'Veo 3 · Pro 超高质量带音频',    type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3 Pro Frames (青栀)':       { id: 'veo3-pro-frames',       name: 'Veo 3 · Pro 首帧 带音频',      type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3.1 (青栀)':                { id: 'veo3.1',                name: 'Veo 3.1 · Fast 自适应首帧',     type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+  'Veo 3.1 Pro (青栀)':            { id: 'veo3.1-pro',            name: 'Veo 3.1 · Pro 自适应首帧',     type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/veo/v1/video/create', defaultQueryEndpoint: '/veo/v1/video/query' },
+
+  // V-PAI Seedance 系列（鉴权用标准 Bearer，创建走 /task/volces/seedance，查询走 /task/{id}）
+  'Seedance 1.5 全能 (V-PAI)':       { id: 'doubao-seedance-1-5-pro-251215',      name: '1.5 全能视频模型',        type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/task/volces/seedance', defaultQueryEndpoint: '/task' },
+  'Seedance 1.0 全能 (V-PAI)':       { id: 'doubao-seedance-1-0-pro-250528',      name: '1.0 全能视频模型',        type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/task/volces/seedance', defaultQueryEndpoint: '/task' },
+  'Seedance 1.0 全能 · 快速 (V-PAI)': { id: 'doubao-seedance-1-0-pro-fast-251015', name: '1.0 全能视频模型 · 快速', type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/task/volces/seedance', defaultQueryEndpoint: '/task' },
+  'Seedance Lite 文生 (V-PAI)':      { id: 'doubao-seedance-1-0-lite-t2v-250428', name: '文生视频模型',           type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/task/volces/seedance', defaultQueryEndpoint: '/task' },
+  'Seedance Lite 首尾帧 (V-PAI)':    { id: 'doubao-seedance-1-0-lite-i2v-250428', name: '首尾帧视频模型',         type: 'VIDEO_GEN_STD', category: 'VIDEO', defaultEndpoint: '/task/volces/seedance', defaultQueryEndpoint: '/task' },
+
   ...customModels
 };
 

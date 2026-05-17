@@ -1,10 +1,11 @@
 
 import type { VideoModelRules, ModelConfig } from "../types";
-import { generateGenericVideo, generateVeo3Video, generateGrokVideo, generateSoraVideo } from "./veo";
+import { generateGenericVideo, generateVeo3Video, generateGrokVideo, generateSoraVideo, generateQingzhiVeoVideo } from "./veo";
 import { generateMinimaxVideo } from "./minimax";
 import { generateSeedanceVideo } from "./seedance";
 import { generateKlingO1Video, generateKlingStandardVideo } from "./kling";
 import { generateAlibailianVideo } from "./alibailian";
+import { generateVPaiSeedanceVideo } from "./vpai";
 import { fetchThirdParty, constructUrl } from "../network";
 
 // --- Base Rules ---
@@ -245,6 +246,36 @@ export const GenericVideoHandler = {
     }
 };
 
+// === V-PAI Seedance Handler（5 个模型共用，cfg.modelId 决定具体型号）===
+// API 不暴露 size/duration/aspectRatio 入参，由模型自适应
+export const VPaiSeedanceHandler = {
+    rules: { resolutions: ['480p', '720p', '1080p'], durations: ['5s', '10s'], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], maxInputImages: 2 },
+    generate: async (cfg: ModelConfig, prompt: string, params: any) => {
+        // 暂固定参数：--ratio adaptive --dur 4（忽略 UI 选项）
+        return await generateVPaiSeedanceVideo(
+            cfg,
+            prompt,
+            params.inputImages || [],
+            !!params.isStartEndMode,
+            'adaptive',     // aspectRatio
+            undefined,      // resolution（不拼 --rs）
+            '4',            // duration
+        );
+    }
+};
+
+// === 青栀 AI 视频生成 Handler（共用，cfg.modelId 决定具体走哪个 Veo 变体）===
+// 端点：POST /veo/v1/video/create  +  GET /veo/v1/video/query
+// 鉴权：Authorization 头放裸 key（不要 Bearer）
+// payload 字段：{ prompt, model, enhance_prompt, images, aspect_ratio }
+export const QingzhiVeoHandler = {
+    rules: { resolutions: ['720p', '1080p'], durations: ['8s'], ratios: ['16:9', '9:16'], maxInputImages: 3 },
+    generate: async (cfg: ModelConfig, prompt: string, params: any) => {
+        // modelId 已经由 MODEL_REGISTRY 里登记的 id 字段决定（veo2 / veo2-fast / veo3-pro 等）
+        return await generateQingzhiVeoVideo(cfg, prompt, params.aspectRatio, params.inputImages || []);
+    }
+};
+
 export const VIDEO_HANDLERS: Record<string, any> = {
     '__GENERIC__': GenericVideoHandler,
     'Sora 2': Sora2Handler,
@@ -252,23 +283,43 @@ export const VIDEO_HANDLERS: Record<string, any> = {
     'Veo 3.1 Pro': VeoProHandler,
     '海螺2.0': HailuoHandler,
     '海螺2.3': HailuoHandler,
-    
+
     // Kling O1
     'Kling O1 Std': KlingO1StdHandler,
     'Kling O1 Pro': KlingO1ProHandler,
-    
+
     // Kling 2.5
     'Kling 2.5 Std': Kling25StdHandler,
     'Kling 2.5 Pro': Kling25ProHandler,
-    
+
     // Kling 2.6
     'Kling 2.6 ProNS': Kling26ProNSHandler,
     'Kling 2.6 ProYS': Kling26ProYSHandler,
-    
+
     '即梦 3.5': SeedanceHandler,
 
     'Wan2.6': WanHandler,
     'Wan2.5': WanHandler,
-    
-    'Grok video 3': Grok3Handler
+
+    'Grok video 3': Grok3Handler,
+
+    // 青栀 AI Veo 系列（11 个变体共用一个 handler，由 modelId 区分）
+    'Veo 2 (青栀)':                  QingzhiVeoHandler,
+    'Veo 2 Fast (青栀)':             QingzhiVeoHandler,
+    'Veo 2 Fast Frames (青栀)':      QingzhiVeoHandler,
+    'Veo 2 Fast Components (青栀)':  QingzhiVeoHandler,
+    'Veo 2 Pro (青栀)':              QingzhiVeoHandler,
+    'Veo 3 (青栀)':                  QingzhiVeoHandler,
+    'Veo 3 Fast (青栀)':             QingzhiVeoHandler,
+    'Veo 3 Pro (青栀)':              QingzhiVeoHandler,
+    'Veo 3 Pro Frames (青栀)':       QingzhiVeoHandler,
+    'Veo 3.1 (青栀)':                QingzhiVeoHandler,
+    'Veo 3.1 Pro (青栀)':            QingzhiVeoHandler,
+
+    // V-PAI Seedance 系列（5 个模型共用一个 handler，由 modelId 区分）
+    'Seedance 1.5 全能 (V-PAI)':         VPaiSeedanceHandler,
+    'Seedance 1.0 全能 (V-PAI)':         VPaiSeedanceHandler,
+    'Seedance 1.0 全能 · 快速 (V-PAI)':   VPaiSeedanceHandler,
+    'Seedance Lite 文生 (V-PAI)':        VPaiSeedanceHandler,
+    'Seedance Lite 首尾帧 (V-PAI)':      VPaiSeedanceHandler,
 };

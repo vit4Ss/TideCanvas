@@ -1,13 +1,15 @@
-import React, { useState, useRef, useEffect, memo, useMemo } from 'react';
+import React, { useState, useRef, useEffect, memo, useMemo, useCallback } from 'react';
 import { Icons } from './Icons';
 import { NodeData } from '../types';
+import { storageService, AssetEntry } from '../services/storageService';
 
 interface SidebarProps {
   onClearCanvas: () => void;
-  onImportAsset: () => void;
   onOpenExportImport: () => void;
   nodes: NodeData[];
   onPreviewMedia: (url: string, type: 'image' | 'video') => void;
+  onAddAssetToCanvas?: (asset: { src: string; title?: string; width?: number; height?: number; }) => void;
+  onImportToLibrary?: () => void;
   isDark?: boolean;
   // Top-right toolbar actions migrated to sidebar
   onToggleTheme: () => void;
@@ -15,7 +17,7 @@ interface SidebarProps {
   onOpenCanvasManager: () => void;
 }
 
-type ActivePanel = 'HISTORY' | null;
+type ActivePanel = 'HISTORY' | 'ASSETS' | null;
 
 const HistoryItem = memo(({ node, type, onClick, isDark }: { node: NodeData, type: 'image' | 'video', onClick: () => void, isDark: boolean }) => {
     const stackCount = node.outputArtifacts?.length || 0;
@@ -60,12 +62,13 @@ const HistoryItem = memo(({ node, type, onClick, isDark }: { node: NodeData, typ
            (prev.node.outputArtifacts?.length || 0) === (next.node.outputArtifacts?.length || 0);
 });
 
-const Sidebar: React.FC<SidebarProps> = ({ 
+const Sidebar: React.FC<SidebarProps> = ({
   onClearCanvas,
-  onImportAsset,
   onOpenExportImport,
   nodes,
   onPreviewMedia,
+  onAddAssetToCanvas,
+  onImportToLibrary,
   isDark = true,
   onToggleTheme,
   onOpenSettings,
@@ -73,8 +76,31 @@ const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [historyTab, setHistoryTab] = useState<'image' | 'video'>('image');
+  const [assets, setAssets] = useState<AssetEntry[]>([]);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  const refreshAssets = useCallback(async () => {
+    try {
+      const list = await storageService.listAssets();
+      setAssets(list);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (activePanel === 'ASSETS') refreshAssets();
+  }, [activePanel, refreshAssets]);
+
+  useEffect(() => {
+    const onUpdate = () => refreshAssets();
+    window.addEventListener('assetLibraryUpdated', onUpdate);
+    return () => window.removeEventListener('assetLibraryUpdated', onUpdate);
+  }, [refreshAssets]);
+
+  const handleDeleteAsset = useCallback(async (id: string) => {
+    await storageService.deleteAsset(id);
+    refreshAssets();
+  }, [refreshAssets]);
 
   // Deduplicate nodes for history display
   const uniqueNodes = useMemo(() => {
@@ -267,6 +293,100 @@ const Sidebar: React.FC<SidebarProps> = ({
       );
     }
 
+    // 素材库面板
+    if (activePanel === 'ASSETS') {
+      return (
+        <div
+          ref={panelRef}
+          className={`fixed left-[92px] top-4 bottom-4 w-80 ${bgMain} backdrop-blur-2xl border ${borderColor} rounded-[26px] z-[190] flex flex-col shadow-2xl shadow-black/10 animate-in slide-in-from-left-2 fade-in duration-200 overflow-hidden`}
+        >
+          {/* Header */}
+          <div className={`px-5 py-4 border-b ${borderColor} flex items-center justify-between shrink-0 ${isDark ? 'bg-white/[0.02]' : 'bg-slate-50/70'}`}>
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-2xl ${isDark ? 'bg-purple-500/15' : 'bg-purple-50'}`}>
+                <Icons.Images size={18} className={isDark ? 'text-purple-400' : 'text-purple-600'} />
+              </div>
+              <div>
+                <h3 className={`text-base font-bold ${textMain}`}>素材库</h3>
+                <p className={`text-xs ${textMuted}`}>跨画布共享的图片集合</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={onImportToLibrary}
+                title="导入本地图片到素材库"
+                className={`inline-flex h-8 items-center gap-1.5 px-2.5 rounded-lg text-[12px] font-medium transition-all ${isDark ? 'bg-purple-500/15 text-purple-300 hover:bg-purple-500/25' : 'bg-purple-50 text-purple-600 hover:bg-purple-100'}`}
+              >
+                <Icons.Upload size={13} />
+                <span>导入</span>
+              </button>
+              <button
+                onClick={() => setActivePanel(null)}
+                className={`p-2 rounded-xl ${hoverBg} ${textSub}`}
+              >
+                <Icons.X size={18} />
+              </button>
+            </div>
+          </div>
+
+          {/* Content Grid */}
+          <div className="flex-1 p-4 overflow-y-auto custom-scrollbar">
+            {assets.length === 0 ? (
+              <div className={`flex flex-col items-center justify-center h-full ${textMuted}`}>
+                <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+                  <Icons.Images size={28} className="opacity-40" />
+                </div>
+                <p className="text-sm font-medium">素材库为空</p>
+                <p className={`text-xs mt-1 ${textMuted}`}>在图片节点点击"加入素材库"以收藏</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                {assets.map(asset => (
+                  <div
+                    key={asset.id}
+                    className={`relative aspect-square rounded-xl overflow-hidden cursor-pointer group ${isDark ? 'bg-zinc-900' : 'bg-gray-100'}`}
+                    onClick={() => onAddAssetToCanvas?.({ src: asset.src, title: asset.title, width: asset.width, height: asset.height })}
+                    title="点击加入画布"
+                  >
+                    <img src={asset.src} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105" loading="lazy" decoding="async" />
+
+                    {/* Delete button */}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); handleDeleteAsset(asset.id); }}
+                      className="absolute top-1.5 right-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md bg-black/55 hover:bg-red-500/90 backdrop-blur-sm text-white/85 hover:text-white transition-all opacity-0 group-hover:opacity-100 shadow-md"
+                      title="删除"
+                    >
+                      <Icons.Trash2 size={11} />
+                    </button>
+
+                    <div className={`absolute inset-x-0 bottom-0 p-2 ${isDark ? 'bg-gradient-to-t from-black/80 to-transparent' : 'bg-gradient-to-t from-white/90 to-transparent'}`}>
+                      <div className={`text-[11px] truncate font-medium ${isDark ? 'text-white' : 'text-gray-800'}`}>{asset.title}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Footer Stats */}
+          <div className={`px-4 py-3 border-t ${borderColor} shrink-0`}>
+            <div className={`flex items-center justify-between text-xs ${textMuted}`}>
+              <span>共 {assets.length} 项</span>
+              <button
+                type="button"
+                onClick={() => { if (confirm('清空全部素材？此操作不可恢复。')) storageService.clearAssets().then(refreshAssets); }}
+                className={`${textMuted} hover:text-red-500 transition-colors`}
+                disabled={assets.length === 0}
+              >
+                清空
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return null;
   };
 
@@ -278,7 +398,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         className={`fixed left-5 top-1/2 -translate-y-1/2 z-[200] ${bgMain} backdrop-blur-2xl border ${borderColor} rounded-[26px] p-2.5 flex flex-col items-center gap-1.5 shadow-2xl shadow-black/10`}
       >
         <SidebarButton icon={Icons.Clock} panel="HISTORY" tooltip="生成历史" />
-        <SidebarButton icon={Icons.Upload} tooltip="导入素材" onClick={onImportAsset} />
+        <SidebarButton icon={Icons.Images} panel="ASSETS" tooltip="素材库" />
 
         <div className={`w-8 h-px my-1 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
 

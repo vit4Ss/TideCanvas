@@ -70,7 +70,7 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
         if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
     };
 
-    const bgClass = isDark ? 'bg-[#1a1a1a] border-zinc-700' : 'bg-white border-gray-200 shadow-xl';
+    const bgClass = isDark ? 'bg-[#181818] border-zinc-700 shadow-2xl shadow-black/60' : 'bg-white border-gray-300 shadow-2xl shadow-gray-400/40';
     const hoverClass = isDark ? 'hover:bg-zinc-700' : 'hover:bg-gray-100';
     const iconColor = isDark ? 'text-zinc-400 group-hover:text-white' : 'text-gray-500 group-hover:text-gray-700';
     const optionHover = isDark ? 'hover:bg-zinc-700 hover:text-white' : 'hover:bg-gray-100 hover:text-gray-900';
@@ -119,7 +119,7 @@ export const LocalCustomDropdown = ({ options, value, onChange, isOpen, onToggle
 
             {/* Main Dropdown Body */}
             {isOpen && (
-                <div className={`absolute bottom-full mb-2 ${align === 'left' ? 'left-0' : align === 'right' ? 'right-0' : 'left-1/2 -translate-x-1/2'} ${width} min-w-[130px] ${bgClass} border rounded-xl shadow-2xl py-1.5 z-[100] animate-in fade-in slide-in-from-bottom-2 duration-150 overflow-visible`} onMouseDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+                <div className={`absolute bottom-full mb-2 ${align === 'left' ? 'left-0' : align === 'right' ? 'right-0' : 'left-1/2 -translate-x-1/2'} ${width} min-w-[160px] ${bgClass} border rounded-xl py-1.5 z-[100] animate-in fade-in slide-in-from-bottom-2 duration-150 overflow-visible`} onMouseDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
                     
                     <div ref={listRef} className="max-h-[300px] overflow-y-auto custom-scrollbar px-1.5">
                         {options.map((opt: any) => {

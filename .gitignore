@@ -13,6 +13,12 @@ dist-ssr
 release
 *.local
 
+# Local working artifacts (e.g. ffmpeg concat output cache)
+work-img/
+
+# Claude Code local config
+.claude/
+
 # Environment variables
 .env
 .env.*

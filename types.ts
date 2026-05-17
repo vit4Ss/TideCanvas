@@ -14,6 +14,8 @@ export enum NodeType {
 
   CREATIVE_DESC = 'CREATIVE_DESC',
 
+  STORYBOARD = 'STORYBOARD',
+
   ORIGINAL_IMAGE = 'ORIGINAL_IMAGE',
 
   ORIGINAL_VIDEO = 'ORIGINAL_VIDEO',
@@ -47,6 +49,8 @@ export interface NodeData {
   prompt?: string;
 
   imageSrc?: string; // Result or Input (Active Selection)
+
+  inputImageSrc?: string; // 显式输入图（拆分网格→HD 生成场景：cropped piece，与上游连线无关）
 
   videoSrc?: string; // Result (Active Selection)
 

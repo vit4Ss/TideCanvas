@@ -12,7 +12,9 @@ import { NodeContent } from './components/Nodes/NodeContent';
 
 import { Icons } from './components/Icons';
 
-import { generateCreativeDescription, generateImage, generateVideo } from './services/geminiService';
+import { generateCreativeDescription, generateImage, generateVideo, generateStoryboard } from './services/geminiService';
+import { parseStoryboardShots, cropImageToGrid, loadImageRobust } from './services/imageCrop';
+import { SplitGridModal, SplitGridConfirmPayload, SplitShot } from './components/SplitGridModal';
 
 import { storageService } from './services/storageService';
 
@@ -187,6 +189,8 @@ const CanvasWithSidebar: React.FC = () => {
 
   const [deletedNodes, setDeletedNodes] = useState<NodeData[]>([]);
 
+  const [isMergingVideos, setIsMergingVideos] = useState(false);
+
 
 
   useEffect(() => {
@@ -291,6 +295,26 @@ const CanvasWithSidebar: React.FC = () => {
 
   const [selectionBox, setSelectionBox] = useState<{ x: number, y: number, w: number, h: number } | null>(null);
 
+  // 选中节点的可视边界（container-internal screen coords）。
+  // 优先用用户拖框出的 selectionBox；否则根据 Ctrl+点击多选的节点 world 坐标算一个虚拟框，
+  // 让右上角浮条在「点击多选」场景也能渲染出来
+  const displaySelectionBox = useMemo(() => {
+    if (selectionBox) return selectionBox;
+    if (selectedNodeIds.size === 0) return null;
+    const sel = nodes.filter(n => selectedNodeIds.has(n.id));
+    if (sel.length === 0) return null;
+    const minX = Math.min(...sel.map(n => n.x));
+    const minY = Math.min(...sel.map(n => n.y));
+    const maxX = Math.max(...sel.map(n => n.x + n.width));
+    const maxY = Math.max(...sel.map(n => n.y + n.height));
+    return {
+      x: minX * transform.k + transform.x,
+      y: minY * transform.k + transform.y,
+      w: (maxX - minX) * transform.k,
+      h: (maxY - minY) * transform.k,
+    };
+  }, [selectionBox, selectedNodeIds, nodes, transform]);
+
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
 
   const [suggestedNodes, setSuggestedNodes] = useState<NodeData[]>([]);
@@ -346,6 +370,7 @@ const CanvasWithSidebar: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const dragStartRef = useRef<{ x: number, y: number, w?: number, h?: number, nodeId?: string }>({ x: 0, y: 0 });
+  const lastCanvasMouseDownAtRef = useRef<number>(0); // 双击检测：上一次画布 mousedown 时间戳
 
   const initialTransformRef = useRef<CanvasTransform>({ x: 0, y: 0, k: ZOOM_BASE_SCALE });
 
@@ -547,6 +572,58 @@ const CanvasWithSidebar: React.FC = () => {
     return inputsMap[nodeId] || EMPTY_ARRAY;
 
   }, [inputsMap]);
+
+  // Map each node to upstream text reference (used by image/video nodes as "use upstream text" chip).
+  // Only collects from text-type sources (CREATIVE_DESC / STORYBOARD).
+  const upstreamTextMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    nodes.forEach(node => {
+      const source = connections
+        .filter(c => c.targetId === node.id)
+        .map(c => nodes.find(n => n.id === c.sourceId))
+        .find(n => !!n && (n.type === NodeType.CREATIVE_DESC || n.type === NodeType.STORYBOARD));
+      if (source) {
+        const text = (source.optimizedPrompt || source.prompt || '').trim();
+        if (text) map[node.id] = text;
+      }
+    });
+    return map;
+  }, [nodes, connections]);
+
+  // Unified upstream refs for STORYBOARD nodes —— 不区分类型，所有上游都作为素材引用
+  interface StoryboardRef {
+    kind: 'text' | 'image';
+    title: string;
+    content: string; // text: 文本内容；image: 提示词描述
+    imageSrc?: string; // 仅 image 类型
+  }
+  const storyboardUpstreamMap = useMemo(() => {
+    const map: Record<string, StoryboardRef[]> = {};
+    nodes.forEach(node => {
+      if (node.type !== NodeType.STORYBOARD) return;
+      const sources = connections
+        .filter(c => c.targetId === node.id)
+        .map(c => nodes.find(n => n.id === c.sourceId))
+        .filter((n): n is NodeData => !!n);
+
+      const refs: StoryboardRef[] = sources.map(n => {
+        const isText = n.type === NodeType.CREATIVE_DESC || n.type === NodeType.STORYBOARD;
+        if (isText) {
+          const text = (n.optimizedPrompt || n.prompt || '').trim();
+          return text ? { kind: 'text' as const, title: n.title || '文本', content: text } : null;
+        }
+        // 任意带图或带 prompt 的节点
+        const prompt = (n.prompt || '').trim();
+        if (n.imageSrc || prompt) {
+          return { kind: 'image' as const, title: n.title || '素材', content: prompt, imageSrc: n.imageSrc };
+        }
+        return null;
+      }).filter((r): r is StoryboardRef => !!r);
+
+      map[node.id] = refs;
+    });
+    return map;
+  }, [nodes, connections]);
 
   
 
@@ -884,6 +961,18 @@ const CanvasWithSidebar: React.FC = () => {
 
         if (!dataOverride?.height) h = 400;
 
+    } else if (type === NodeType.CREATIVE_DESC) {
+
+        if (!dataOverride?.width) w = 600;
+
+        if (!dataOverride?.height) h = 570;
+
+    } else if (type === NodeType.STORYBOARD) {
+
+        if (!dataOverride?.width) w = 640;
+
+        if (!dataOverride?.height) h = 620;
+
     }
 
     
@@ -919,6 +1008,8 @@ const CanvasWithSidebar: React.FC = () => {
             case NodeType.START_END_TO_VIDEO: return `首尾帧视频 ${nextIndex('首尾帧视频')}`;
 
             case NodeType.CREATIVE_DESC: return `文本节点 ${nextIndex('文本节点')}`;
+
+            case NodeType.STORYBOARD: return `脚本节点 ${nextIndex('脚本节点')}`;
 
             case NodeType.PANORAMA_360: return `全景 ${nextIndex('全景')}`;
 
@@ -1057,6 +1148,14 @@ const CanvasWithSidebar: React.FC = () => {
 
           w = 400; h = 400;
 
+      } else if (resolvedType === NodeType.CREATIVE_DESC) {
+
+          w = 600; h = 570;
+
+      } else if (resolvedType === NodeType.STORYBOARD) {
+
+          w = 640; h = 620;
+
       }
 
 
@@ -1092,6 +1191,8 @@ const CanvasWithSidebar: React.FC = () => {
               case NodeType.START_END_TO_VIDEO: return `首尾帧视频 ${nextIndex('首尾帧视频')}`;
 
               case NodeType.CREATIVE_DESC: return `文本节点 ${nextIndex('文本节点')}`;
+
+            case NodeType.STORYBOARD: return `脚本节点 ${nextIndex('脚本节点')}`;
 
               case NodeType.PANORAMA_360: return `全景 ${nextIndex('全景')}`;
 
@@ -1390,11 +1491,27 @@ const CanvasWithSidebar: React.FC = () => {
 
         const target = e.target as HTMLElement;
 
-        const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+        const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
+        // DEBUG: 删除键打日志，方便定位为什么没删
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            console.log('[Delete Key]', {
+                key: e.key,
+                targetTag: target?.tagName,
+                isContentEditable: target?.isContentEditable,
+                isInput,
+                selectedNodes: selectedNodeIds.size,
+                selectedConn: selectedConnectionId,
+                activeEl: document.activeElement?.tagName,
+            });
+        }
 
         if (!isInput) {
 
             if (e.key === 'Delete' || e.key === 'Backspace') {
+
+                 e.preventDefault();
+                 e.stopPropagation();
 
                  const hasDeletableSelection = selectedNodeIds.size > 0 || !!selectedConnectionId;
 
@@ -1417,6 +1534,10 @@ const CanvasWithSidebar: React.FC = () => {
                      setConnections(prev => prev.filter(c => !selectedNodeIds.has(c.sourceId) && !selectedNodeIds.has(c.targetId)));
 
                      setSelectedNodeIds(new Set());
+
+                     setSelectionBox(null); // 清掉选区框
+
+                     console.log('[Delete] Removed', nodesToDelete.length, 'nodes');
 
                  }
 
@@ -1488,6 +1609,9 @@ const CanvasWithSidebar: React.FC = () => {
 
             if (isExportImportOpen) setIsExportImportOpen(false);
 
+            // 取消持久化选区
+            if (selectionBox) { setSelectionBox(null); setSelectedNodeIds(new Set()); }
+
         }
 
         if (e.code === 'Space') spacePressed.current = true;
@@ -1508,7 +1632,7 @@ const CanvasWithSidebar: React.FC = () => {
 
     };
 
-  }, [selectedNodeIds, selectedConnectionId, previewMedia, contextMenu, nodes, connections, quickAddMenu, showNewWorkflowDialog, isSettingsOpen, isExportImportOpen, handleAlign, pushHistory, handleUndo, handleRedo]);
+  }, [selectedNodeIds, selectedConnectionId, previewMedia, contextMenu, nodes, connections, quickAddMenu, showNewWorkflowDialog, showClearCanvasDialog, isSettingsOpen, isExportImportOpen, selectionBox, handleAlign, pushHistory, handleUndo, handleRedo]);
 
 
 
@@ -1585,9 +1709,25 @@ const CanvasWithSidebar: React.FC = () => {
 
     
 
-    const inputs = getInputImages(node.id);
+    // 用 workspaceStateRef 直接计算 inputs，避免 inputsMap 闭包过期
+    const wsNodes = workspaceStateRef.current.nodes;
+    const wsConnections = workspaceStateRef.current.connections;
+    const needsImage = node.type === NodeType.IMAGE_TO_IMAGE || node.type === NodeType.IMAGE_TO_VIDEO || node.type === NodeType.START_END_TO_VIDEO;
 
-    
+    let inputs: string[];
+    // 关键：inputImageSrc 优先级高于连接 input（拆分网格→HD 场景：每个 HD 节点都连着源 32 宫格，
+    //   如果用连接就会拿到同一张大图，所以必须用 inputImageSrc 里的"切下来的格子"）
+    if (node.inputImageSrc && needsImage) {
+        inputs = [node.inputImageSrc];
+        console.log('[Generate] using node.inputImageSrc (overrides connection inputs)');
+    } else {
+        inputs = wsConnections
+            .filter(c => c.targetId === node.id)
+            .map(c => wsNodes.find(n => n.id === c.sourceId))
+            .filter((n): n is NodeData => !!n && (needsImage ? !!n.imageSrc : !!(n.imageSrc || n.videoSrc)))
+            .map(n => needsImage ? (n.imageSrc || '') : (n.imageSrc || n.videoSrc || ''))
+            .filter(Boolean);
+    }
 
     // Debug: Log input images for troubleshooting
 
@@ -1603,11 +1743,80 @@ const CanvasWithSidebar: React.FC = () => {
 
         updateNodeData(nodeId, { optimizedPrompt: res, isLoading: false });
 
+      } else if (node.type === NodeType.STORYBOARD) {
+
+        // 所有上游统一作为素材；用户在输入框写的是故事
+        const sources = wsConnections
+            .filter(c => c.targetId === node.id)
+            .map(c => wsNodes.find(n => n.id === c.sourceId))
+            .filter((n): n is NodeData => !!n);
+        const story = (node.prompt || '').trim();
+        const refs = sources.map(n => {
+            const isText = n.type === NodeType.CREATIVE_DESC || n.type === NodeType.STORYBOARD;
+            if (isText) {
+                const text = (n.optimizedPrompt || n.prompt || '').trim();
+                return text ? { title: n.title || '文本', text, kind: 'text' as const, imageSrc: undefined as string | undefined } : null;
+            }
+            const prompt = (n.prompt || '').trim();
+            const imageSrc = n.imageSrc;
+            if (!prompt && !imageSrc) return null;
+            return { title: n.title || '素材', text: prompt, kind: 'image' as const, imageSrc };
+        }).filter((r): r is { title: string; text: string; kind: 'text' | 'image'; imageSrc: string | undefined } => !!r);
+
+        if (!story && refs.length === 0) {
+            throw new Error('请提供故事内容（在输入框写故事，或连接节点作为素材）');
+        }
+
+        // 组合：素材引用文字描述 + 用户故事
+        const composed = [
+            refs.length > 0
+                ? `【素材引用】\n${refs.map((r, i) => `[${i + 1}] (${r.kind === 'text' ? '文本' : '图片'}) ${r.title}：${r.text || '(见配套图片)'}`).join('\n')}`
+                : '',
+            story
+                ? `【故事】\n${story}`
+                : '【故事】\n（无明确故事，请根据上述素材引用自行设计一个轻松搞笑的小故事并生成分镜）',
+        ].filter(Boolean).join('\n\n');
+
+        // 图片源：所有 kind === 'image' 且带 imageSrc 的引用，按序传给模型（vision 接口）
+        const images = refs
+            .filter(r => r.kind === 'image' && !!r.imageSrc)
+            .map(r => r.imageSrc!)
+            .slice(0, 8); // 最多 8 张，避免 payload 过大
+
+        const res = await generateStoryboard(composed, images, node.model);
+        updateNodeData(nodeId, { optimizedPrompt: res, isLoading: false });
+
       } else {
 
           let results: string[] = [];
 
-          
+          // 检测上游是否有文本/脚本节点；有则把内容前置注入到 prompt（避免 "上述分镜脚本" 之类的引用模型读不到）
+          const upstreamTextSources = wsConnections
+              .filter(c => c.targetId === node.id)
+              .map(c => wsNodes.find(n => n.id === c.sourceId))
+              .filter((n): n is NodeData => !!n && (n.type === NodeType.CREATIVE_DESC || n.type === NodeType.STORYBOARD));
+          const upstreamTextBlock = upstreamTextSources
+              .map(n => {
+                  const t = (n.optimizedPrompt || n.prompt || '').trim();
+                  if (!t) return '';
+                  const tag = n.type === NodeType.STORYBOARD ? '分镜脚本' : '参考文本';
+                  return `【${tag} · ${n.title || ''}】\n${t}`;
+              })
+              .filter(Boolean)
+              .join('\n\n');
+          // 避免重复注入：若用户已手动复制过文本到 prompt，开头片段会重合
+          const ownPrompt = (node.prompt || '').trim();
+          const alreadyInPrompt = upstreamTextBlock && ownPrompt.length > 30
+              && upstreamTextSources.some(n => {
+                  const t = (n.optimizedPrompt || n.prompt || '').trim().slice(0, 30);
+                  return t && ownPrompt.includes(t);
+              });
+          const finalPrompt = (upstreamTextBlock && !alreadyInPrompt)
+              ? `${upstreamTextBlock}\n\n【用户提示】\n${ownPrompt}`
+              : ownPrompt;
+          if (upstreamTextBlock) {
+              console.log('[Generate] auto-prepended upstream text', { length: upstreamTextBlock.length, alreadyInPrompt });
+          }
 
           // Image generation
 
@@ -1615,19 +1824,25 @@ const CanvasWithSidebar: React.FC = () => {
 
             results = await generateImage(
 
-                node.prompt || '', node.aspectRatio, node.model, node.resolution, node.count || 1, inputs, node.promptOptimize 
+                finalPrompt, node.aspectRatio, node.model, node.resolution, node.count || 1, inputs, node.promptOptimize
 
             );
 
           }
 
-          // Video generation 
+          // Video generation
 
           else if (node.type === NodeType.TEXT_TO_VIDEO || node.type === NodeType.IMAGE_TO_VIDEO) {
 
+            // 视频模型通常只接受 1 张参考图；多传会被网关拒绝或 payload 过大。这里只取第一张。
+            const videoInputs = inputs.slice(0, 1);
+            if (inputs.length > 1) {
+                console.warn(`[Generate] Video node received ${inputs.length} input images, using first one only. Excess images ignored.`);
+            }
+
             results = await generateVideo(
 
-                node.prompt || '', inputs, node.aspectRatio, node.model, node.resolution, node.duration, node.count || 1, node.promptOptimize
+                finalPrompt, videoInputs, node.aspectRatio, node.model, node.resolution, node.duration, node.count || 1, node.promptOptimize
 
             );
 
@@ -1641,13 +1856,19 @@ const CanvasWithSidebar: React.FC = () => {
 
             const modelWithFL = (node.model || 'Sora 2') + '_FL';
 
+            // 首尾帧只接受 2 张（首+尾），多余的忽略
+            const trimmedInputs = inputs.slice(0, 2);
             // 如果设置了 swapFrames，交换首尾帧顺序
 
-            const orderedInputs = node.swapFrames && inputs.length >= 2 ? [inputs[1], inputs[0]] : inputs;
+            const orderedInputs = node.swapFrames && trimmedInputs.length >= 2 ? [trimmedInputs[1], trimmedInputs[0]] : trimmedInputs;
+
+            if (inputs.length > 2) {
+                console.warn(`[Generate] START_END_TO_VIDEO received ${inputs.length} input images, only first 2 used.`);
+            }
 
             results = await generateVideo(
 
-                node.prompt || '', orderedInputs, node.aspectRatio, modelWithFL, node.resolution, node.duration, node.count || 1, node.promptOptimize
+                finalPrompt, orderedInputs, node.aspectRatio, modelWithFL, node.resolution, node.duration, node.count || 1, node.promptOptimize
 
             );
 
@@ -1736,7 +1957,8 @@ const CanvasWithSidebar: React.FC = () => {
       const height = Math.max(source.height, 480);
       const newNode: NodeData = {
           id: generateId(),
-          type: NodeType.TEXT_TO_IMAGE,
+          // 源节点带 imageSrc 时，新节点应是图生图（依赖参考图保持角色/产品一致性）
+          type: source.imageSrc ? NodeType.IMAGE_TO_IMAGE : NodeType.TEXT_TO_IMAGE,
           x: source.x + source.width + 80,
           y: source.y,
           width,
@@ -1849,6 +2071,229 @@ const CanvasWithSidebar: React.FC = () => {
   
 
   const handleHistoryPreview = (url: string, type: 'image' | 'video') => setPreviewMedia({ url, type });
+
+  // 拆分网格模态状态（预设和自定义都走这里）
+  const [splitGridState, setSplitGridState] = useState<{
+    nodeId: string;
+    imageSrc: string;
+    title: string;
+    shots: SplitShot[];
+    presetRows?: number;
+    presetCols?: number;
+  } | null>(null);
+
+  // 批量生成进度（拆分→高清时显示在右下角浮条）
+  const [batchGenProgress, setBatchGenProgress] = useState<{
+    total: number;
+    completed: number;
+    failed: number;
+    label: string;
+    startedAt: number;
+    paused: boolean;
+    cancelled: boolean;
+  } | null>(null);
+  // ref 让 async 循环能读到最新控制状态
+  const batchControlRef = useRef<{ paused: boolean; cancelled: boolean }>({ paused: false, cancelled: false });
+  // 用一个独立计时器让"用时"每秒刷新
+  const [batchTick, setBatchTick] = useState(0);
+  useEffect(() => {
+    if (!batchGenProgress) return;
+    const done = batchGenProgress.completed + batchGenProgress.failed;
+    if (done >= batchGenProgress.total) return; // 完成后不再 tick
+    const id = setInterval(() => setBatchTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [batchGenProgress?.startedAt, batchGenProgress?.completed, batchGenProgress?.failed]);
+
+  const handleSplitImageGrid = async (nodeId: string, presetRows?: number, presetCols?: number) => {
+    const node = workspaceStateRef.current.nodes.find(n => n.id === nodeId) || nodes.find(n => n.id === nodeId);
+    if (!node?.imageSrc) {
+      alert('当前节点没有可拆分的图片');
+      return;
+    }
+    const upstreamShots = workspaceStateRef.current.connections
+      .filter(c => c.targetId === node.id)
+      .map(c => workspaceStateRef.current.nodes.find(n2 => n2.id === c.sourceId))
+      .find(n2 => !!n2 && n2.type === NodeType.STORYBOARD);
+    const shots = upstreamShots
+      ? parseStoryboardShots(upstreamShots.optimizedPrompt || upstreamShots.prompt || '')
+      : [];
+    // 预设和自定义都打开模态；预设只是预填 rows/cols
+    setSplitGridState({
+      nodeId,
+      imageSrc: node.imageSrc,
+      title: node.title || '分镜图',
+      shots,
+      presetRows,
+      presetCols,
+    });
+  };
+
+  const handleSplitGridConfirm = async (payload: SplitGridConfirmPayload) => {
+    if (!splitGridState) return;
+    const sourceNode = workspaceStateRef.current.nodes.find(n => n.id === splitGridState.nodeId);
+    if (!sourceNode) {
+      setSplitGridState(null);
+      return;
+    }
+
+    const { pieces, rows, cols } = payload;
+    // 强制所有拆分生成的节点统一尺寸：固定 360×360 方形
+    // 之所以不按 cell 真实比例自动算高度 —— 是因为：
+    //   1) API 生成时 aspectRatio='1:1'，返回的是方形图
+    //   2) 节点容器和生成结果保持同样比例，object-cover 不会裁切
+    //   3) 32 个节点在画布上看起来整整齐齐，不会一会儿胖一会儿瘦
+    const w = 360;
+    const h = 360;
+    console.log(`[Split Grid] All nodes will be ${w}×${h} (rows=${rows}, cols=${cols}, pieces=${pieces.length})`);
+    const gap = 40;
+    // 排在源图右边，按原 row/col 矩阵位置
+    const startX = sourceNode.x + sourceNode.width + 120;
+    const startY = sourceNode.y;
+
+    const imageModel = sourceNode.model || (getCanvasModelOptions('IMAGE')[0]?.value || '');
+
+    // 1. 创建图生图节点：inputImageSrc = 切下来的格子（绕过 connection-input 机制）
+    const newNodes: NodeData[] = pieces.map((p) => ({
+      id: generateId(),
+      type: NodeType.IMAGE_TO_IMAGE,
+      x: startX + p.col * (w + gap),
+      y: startY + p.row * (h + gap),
+      width: w,
+      height: h,
+      title: p.title,
+      prompt: p.prompt
+        ? `${p.prompt}\n\n要求：高清细节，4K，影视级渲染，保持原构图与主体`
+        : '基于参考图生成高清版本：高清细节，4K，影视级渲染，保持原构图与主体',
+      inputImageSrc: p.dataUrl, // ← 关键：把切出来的格子作为输入图
+      aspectRatio: '1:1',
+      model: imageModel,
+      resolution: '2k', // 高清默认 2K
+      count: 1,
+    }));
+
+    // 2. 连线：源节点 → 每个新节点（视觉上的血缘关系；实际 input 用 inputImageSrc）
+    const newConnections: Connection[] = newNodes.map(nn => ({
+      id: generateId(),
+      sourceId: sourceNode.id,
+      targetId: nn.id,
+    }));
+
+    pushHistory();
+    setNodes(prev => [...prev, ...newNodes]);
+    setConnections(prev => [...prev, ...newConnections]);
+    setSelectedNodeIds(new Set(newNodes.map(nn => nn.id)));
+    setSplitGridState(null);
+
+    console.log(`[Split Grid] Created ${newNodes.length} HD nodes, triggering generation...`);
+
+    // 初始化批量进度 + 重置控制状态
+    batchControlRef.current = { paused: false, cancelled: false };
+    setBatchGenProgress({
+      total: newNodes.length,
+      completed: 0,
+      failed: 0,
+      label: `生成 ${newNodes.length} 张高清分镜`,
+      startedAt: Date.now(),
+      paused: false,
+      cancelled: false,
+    });
+
+    // 3. 等 setNodes 提交后触发并发生成（限流 4 并发，支持暂停/取消）
+    setTimeout(async () => {
+      const concurrency = 4;
+      const queue = [...newNodes];
+      const runNext = async (): Promise<void> => {
+        while (true) {
+          // 取消 → 直接退出
+          if (batchControlRef.current.cancelled) return;
+          // 暂停 → 等 250ms 再检查
+          if (batchControlRef.current.paused) {
+            await new Promise(r => setTimeout(r, 250));
+            continue;
+          }
+          const next = queue.shift();
+          if (!next) return;
+          try {
+            await handleGenerate(next.id);
+            if (!batchControlRef.current.cancelled) {
+              setBatchGenProgress(prev => prev ? { ...prev, completed: prev.completed + 1 } : prev);
+            }
+          } catch (e) {
+            console.error('[Split Grid] generate failed for', next.title, e);
+            if (!batchControlRef.current.cancelled) {
+              setBatchGenProgress(prev => prev ? { ...prev, failed: prev.failed + 1 } : prev);
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: concurrency }, () => runNext()));
+      console.log('[Split Grid] Batch finished. cancelled=', batchControlRef.current.cancelled);
+      // 全部完成或取消后保留浮条 5 秒
+      setTimeout(() => setBatchGenProgress(null), 5000);
+    }, 100);
+  };
+
+  const handleAddToAssetLibrary = async (nodeId: string) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || !node.imageSrc) return;
+    try {
+      await storageService.addAsset({
+        title: node.title || '未命名素材',
+        src: node.imageSrc,
+        type: 'image',
+        sourceNodeId: node.id,
+        sourceNodeType: node.type,
+        width: node.width,
+        height: node.height,
+      });
+      window.dispatchEvent(new CustomEvent('assetLibraryUpdated'));
+    } catch (e) {
+      console.error('Add to asset library failed:', e);
+    }
+  };
+
+  const handleAddAssetToCanvas = (asset: { src: string; title?: string; width?: number; height?: number; }) => {
+    addNode(NodeType.ORIGINAL_IMAGE, undefined, undefined, {
+      title: asset.title || '素材',
+      imageSrc: asset.src,
+      width: asset.width,
+      height: asset.height,
+    });
+  };
+
+  const libraryImportRef = useRef<HTMLInputElement>(null);
+
+  const handleLibraryImportFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length === 0) return;
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) continue;
+      await new Promise<void>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = async (ev) => {
+          const src = ev.target?.result as string;
+          try {
+            await storageService.addAsset({
+              title: file.name.replace(/\.[^.]+$/, '') || '导入素材',
+              src,
+              type: 'image',
+            });
+          } catch (err) {
+            console.error('Import to library failed:', err);
+          }
+          resolve();
+        };
+        reader.onerror = () => resolve();
+        reader.readAsDataURL(file);
+      });
+    }
+    window.dispatchEvent(new CustomEvent('assetLibraryUpdated'));
+  };
+
+  const handleTriggerLibraryImport = () => {
+    libraryImportRef.current?.click();
+  };
 
 
 
@@ -2642,13 +3087,25 @@ const CanvasWithSidebar: React.FC = () => {
 
     if (e.target === containerRef.current && e.button === 0) {
 
-      if (e.ctrlKey || e.metaKey) {
+      // 点击画布 → 主动失去输入框焦点（避免之后按 Delete 时事件还在 textarea 上无法删节点）
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) active.blur();
+
+      // 有持久化的选区框 → 这次点击清掉它（除非按住 Shift 想追加）
+      if (selectionBox && !e.shiftKey) setSelectionBox(null);
+
+      const now = Date.now();
+      const isDoubleClick = now - lastCanvasMouseDownAtRef.current < 350;
+      lastCanvasMouseDownAtRef.current = now;
+
+      // Ctrl/Cmd 拖 或 双击后拖 → 框选模式
+      if (e.ctrlKey || e.metaKey || isDoubleClick) {
 
         setDragMode('SELECT');
 
         dragStartRef.current = { x: e.clientX, y: e.clientY };
 
-        setSelectionBox({ x: 0, y: 0, w: 0, h: 0 }); 
+        setSelectionBox({ x: 0, y: 0, w: 0, h: 0 });
 
         if (!e.shiftKey) setSelectedNodeIds(new Set());
 
@@ -2886,13 +3343,13 @@ const CanvasWithSidebar: React.FC = () => {
 
             let minWidth = 150;
 
-            if (node.type !== NodeType.CREATIVE_DESC) {
+            if (node.type !== NodeType.CREATIVE_DESC && node.type !== NodeType.STORYBOARD) {
 
                 const limit1 = ratio >= 1 ? 400 * ratio : 400;
 
-                minWidth = Math.max(limit1, 400); 
+                minWidth = Math.max(limit1, 400);
 
-            } else minWidth = 280;
+            } else minWidth = node.type === NodeType.STORYBOARD ? 360 : 280;
 
             let newWidth = Math.max(minWidth, (dragStartRef.current.w || 0) + dx);
 
@@ -2914,7 +3371,18 @@ const CanvasWithSidebar: React.FC = () => {
 
     }
 
-    if (dragMode !== 'NONE') { setDragMode('NONE'); setTempConnection(null); connectionStartRef.current = null; setSuggestedNodes([]); setSelectionBox(null); interactionHistoryRecordedRef.current = false; }
+    // SELECT 模式松手：保留选区框（持久化显示，等下次点击或操作再清掉）
+    const wasSelectingWithNodes = dragMode === 'SELECT' && selectedNodeIds.size > 0;
+
+    if (dragMode !== 'NONE') {
+        setDragMode('NONE');
+        setTempConnection(null);
+        connectionStartRef.current = null;
+        setSuggestedNodes([]);
+        // 框选有选中节点时保留 selectionBox；否则清掉
+        if (!wasSelectingWithNodes) setSelectionBox(null);
+        interactionHistoryRecordedRef.current = false;
+    }
 
   };
 
@@ -2927,6 +3395,17 @@ const CanvasWithSidebar: React.FC = () => {
           pushHistory();
 
           setConnections(prev => [...prev, { id: generateId(), sourceId, targetId }]);
+
+          // Auto-promote target type when an image-bearing source is connected
+          const source = nodes.find(n => n.id === sourceId);
+          const target = nodes.find(n => n.id === targetId);
+          if (source && target && source.imageSrc) {
+              if (target.type === NodeType.TEXT_TO_IMAGE) {
+                  setNodes(prev => prev.map(n => n.id === targetId ? { ...n, type: NodeType.IMAGE_TO_IMAGE } : n));
+              } else if (target.type === NodeType.TEXT_TO_VIDEO) {
+                  setNodes(prev => prev.map(n => n.id === targetId ? { ...n, type: NodeType.IMAGE_TO_VIDEO } : n));
+              }
+          }
 
       }
 
@@ -3216,7 +3695,26 @@ const CanvasWithSidebar: React.FC = () => {
 
                         <div className={dividerClass}></div>
 
-                        <MenuItem label="删除" shortcut="⌫" danger onClick={() => { if (contextMenu.nodeId) deleteNode(contextMenu.nodeId); setContextMenu(null); }} />
+                        <MenuItem
+                            label={(selectedNodeIds.size > 1 && contextMenu.nodeId && selectedNodeIds.has(contextMenu.nodeId)) ? `删除选中 ${selectedNodeIds.size} 个节点` : '删除'}
+                            shortcut="⌫"
+                            danger
+                            onClick={() => {
+                                if (selectedNodeIds.size > 1 && contextMenu.nodeId && selectedNodeIds.has(contextMenu.nodeId)) {
+                                    // 多选 + 右键的节点在选中里 → 批量删除全部选中
+                                    pushHistory();
+                                    const nodesToDelete = nodes.filter(n => selectedNodeIds.has(n.id));
+                                    const withContent = nodesToDelete.filter(n => n.imageSrc || n.videoSrc);
+                                    if (withContent.length > 0) setDeletedNodes(prev => [...prev, ...withContent]);
+                                    setNodes(prev => prev.filter(n => !selectedNodeIds.has(n.id)));
+                                    setConnections(prev => prev.filter(c => !selectedNodeIds.has(c.sourceId) && !selectedNodeIds.has(c.targetId)));
+                                    setSelectedNodeIds(new Set());
+                                } else if (contextMenu.nodeId) {
+                                    deleteNode(contextMenu.nodeId);
+                                }
+                                setContextMenu(null);
+                            }}
+                        />
 
                     </>
 
@@ -3270,7 +3768,7 @@ const CanvasWithSidebar: React.FC = () => {
 
                                     <AddNodeSubItem icon={Icons.Sliders} label="音频" disabled />
 
-                                    <AddNodeSubItem icon={Icons.BookOpen} label="脚本" beta disabled />
+                                    <AddNodeSubItem icon={Icons.BookOpen} label="脚本" beta onClick={() => addContextNode(NodeType.STORYBOARD)} />
 
                                     <div className={`px-1.5 py-2 text-sm ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>添加资源</div>
 
@@ -3420,7 +3918,7 @@ const CanvasWithSidebar: React.FC = () => {
 
             <QuickAddItem icon={Icons.Sliders} label="音频" disabled />
 
-            <QuickAddItem icon={Icons.BookOpen} label="脚本" beta disabled />
+            <QuickAddItem icon={Icons.BookOpen} label="脚本" type={NodeType.STORYBOARD} beta />
 
             <div className={sectionTitleClass}>添加资源</div>
 
@@ -3458,6 +3956,135 @@ const CanvasWithSidebar: React.FC = () => {
 
         />
 
+        {splitGridState && (
+            <SplitGridModal
+                isOpen={!!splitGridState}
+                sourceImageSrc={splitGridState.imageSrc}
+                sourceTitle={splitGridState.title}
+                shots={splitGridState.shots}
+                presetRows={splitGridState.presetRows}
+                presetCols={splitGridState.presetCols}
+                onClose={() => setSplitGridState(null)}
+                onConfirm={handleSplitGridConfirm}
+                isDark={isDark}
+            />
+        )}
+
+        {batchGenProgress && (() => {
+            const { total, completed, failed, label, startedAt, paused, cancelled } = batchGenProgress;
+            const done = completed + failed;
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            const isFinished = done >= total || cancelled;
+            const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+
+            const togglePause = () => {
+                const next = !paused;
+                batchControlRef.current.paused = next;
+                setBatchGenProgress(prev => prev ? { ...prev, paused: next } : prev);
+            };
+            const cancelBatch = () => {
+                batchControlRef.current.cancelled = true;
+                batchControlRef.current.paused = false;
+                setBatchGenProgress(prev => prev ? { ...prev, cancelled: true, paused: false } : prev);
+            };
+
+            // 状态颜色
+            const statusColor = cancelled
+                ? (isDark ? 'bg-zinc-500/15 text-zinc-400' : 'bg-zinc-100 text-zinc-600')
+                : paused
+                    ? (isDark ? 'bg-amber-500/15 text-amber-400' : 'bg-amber-100 text-amber-600')
+                    : isFinished
+                        ? (failed > 0
+                            ? (isDark ? 'bg-amber-500/15 text-amber-400' : 'bg-amber-100 text-amber-600')
+                            : (isDark ? 'bg-emerald-500/15 text-emerald-400' : 'bg-emerald-100 text-emerald-600'))
+                        : (isDark ? 'bg-blue-500/15 text-blue-400' : 'bg-blue-100 text-blue-600');
+            const statusIcon = cancelled
+                ? <Icons.X size={16} strokeWidth={3} />
+                : paused
+                    ? <Icons.Pause size={16} />
+                    : isFinished
+                        ? (failed > 0 ? <Icons.Info size={16} /> : <Icons.Check size={16} strokeWidth={3} />)
+                        : <Icons.Loader2 size={16} className="animate-spin" />;
+            const statusLabel = cancelled
+                ? `已取消（${completed} 张已完成）`
+                : paused
+                    ? `已暂停（${done}/${total}）`
+                    : isFinished
+                        ? (failed === 0 ? '全部完成 🎉' : `完成 ${completed} / 失败 ${failed}`)
+                        : label;
+            const barColor = cancelled
+                ? 'bg-gradient-to-r from-zinc-400 to-zinc-500'
+                : paused
+                    ? 'bg-gradient-to-r from-amber-400 to-orange-500'
+                    : isFinished
+                        ? (failed > 0 ? 'bg-gradient-to-r from-amber-400 to-orange-500' : 'bg-gradient-to-r from-emerald-400 to-emerald-500')
+                        : 'bg-gradient-to-r from-blue-400 via-indigo-500 to-purple-500';
+
+            return (
+                <div className="fixed bottom-6 right-6 z-[250] w-[360px] rounded-2xl glass-card overflow-hidden animate-in slide-in-from-bottom-3 fade-in duration-300"
+                    style={{ backgroundColor: isDark ? 'rgba(20,20,22,0.95)' : 'rgba(255,255,255,0.95)', backdropFilter: 'blur(20px)' }}
+                >
+                    <div className={`px-4 py-3 flex items-center gap-3 border-b ${isDark ? 'border-white/[0.06]' : 'border-zinc-100'}`}>
+                        <div className={`flex items-center justify-center w-9 h-9 rounded-xl ${statusColor}`}>
+                            {statusIcon}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className={`text-[13px] font-semibold truncate ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
+                                {statusLabel}
+                            </div>
+                            <div className={`text-[11px] mt-0.5 tabular-nums ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
+                                {done} / {total} · {elapsed}s 用时
+                                {failed > 0 && <span className={isDark ? ' text-red-400' : ' text-red-600'}> · {failed} 失败</span>}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 进度条 */}
+                    <div className={`h-1.5 ${isDark ? 'bg-white/[0.05]' : 'bg-zinc-200'}`}>
+                        <div
+                            className={`h-full transition-all duration-500 ease-out ${barColor}`}
+                            style={{ width: `${pct}%` }}
+                        />
+                    </div>
+
+                    {/* 操作行 */}
+                    <div className={`flex items-center gap-1.5 px-3 py-2 ${isDark ? 'bg-white/[0.02]' : 'bg-zinc-50/60'}`}>
+                        {!isFinished && (
+                            <button
+                                onClick={togglePause}
+                                className={`flex-1 inline-flex h-8 items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium transition-colors ${
+                                    paused
+                                        ? (isDark ? 'bg-blue-500/15 text-blue-300 hover:bg-blue-500/25' : 'bg-blue-50 text-blue-700 hover:bg-blue-100')
+                                        : (isDark ? 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25' : 'bg-amber-50 text-amber-700 hover:bg-amber-100')
+                                }`}
+                            >
+                                {paused ? <Icons.Play size={12} /> : <Icons.Pause size={12} />}
+                                <span>{paused ? '继续' : '暂停'}</span>
+                            </button>
+                        )}
+                        {!isFinished && (
+                            <button
+                                onClick={cancelBatch}
+                                className={`inline-flex h-8 items-center justify-center gap-1.5 px-3 rounded-lg text-[12px] font-medium transition-colors ${isDark ? 'bg-white/[0.04] text-zinc-300 hover:bg-red-500/15 hover:text-red-300' : 'bg-zinc-100 text-gray-700 hover:bg-red-50 hover:text-red-700'}`}
+                            >
+                                <Icons.X size={12} />
+                                <span>取消</span>
+                            </button>
+                        )}
+                        {isFinished && (
+                            <button
+                                onClick={() => setBatchGenProgress(null)}
+                                className={`flex-1 inline-flex h-8 items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium transition-colors ${isDark ? 'bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]' : 'bg-zinc-100 text-gray-700 hover:bg-zinc-200'}`}
+                            >
+                                <Icons.X size={12} />
+                                <span>关闭</span>
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        })()}
+
         <ExportImportModal
 
             isOpen={isExportImportOpen}
@@ -3486,13 +4113,15 @@ const CanvasWithSidebar: React.FC = () => {
 
           onClearCanvas={handleClearCanvas}
 
-          onImportAsset={() => assetInputRef.current?.click()}
+          onImportToLibrary={handleTriggerLibraryImport}
 
           onOpenExportImport={() => setIsExportImportOpen(true)}
 
           nodes={[...nodes, ...deletedNodes]}
 
           onPreviewMedia={handleHistoryPreview}
+
+          onAddAssetToCanvas={handleAddAssetToCanvas}
 
           isDark={isDark}
 
@@ -3531,6 +4160,8 @@ const CanvasWithSidebar: React.FC = () => {
         <input type="file" ref={workflowInputRef} hidden accept=".aistudio-flow,.json" onChange={handleLoadWorkflow} />
 
         <input type="file" ref={assetInputRef} hidden accept="image/*,video/*" onChange={handleImportAsset} />
+
+        <input type="file" ref={libraryImportRef} hidden multiple accept="image/*" onChange={handleLibraryImportFiles} />
 
         <input type="file" ref={replaceImageRef} hidden accept="image/*" onChange={handleReplaceImage} />
 
@@ -3982,11 +4613,20 @@ const CanvasWithSidebar: React.FC = () => {
 
                             inputs={getInputImages(node.id)}
 
+                            upstreamText={upstreamTextMap[node.id]}
+
+                            storyboardUpstream={storyboardUpstreamMap[node.id]}
+
+
                             onMaximize={handleMaximize}
 
                             onDownload={handleDownload}
 
                             onUpload={triggerReplaceImage}
+
+                            onAddToAssetLibrary={handleAddToAssetLibrary}
+
+                            onSplitImageGrid={handleSplitImageGrid}
 
                             isSelecting={dragMode === 'SELECT'}
 
@@ -4004,10 +4644,138 @@ const CanvasWithSidebar: React.FC = () => {
 
             </div>
 
-            {dragMode === 'SELECT' && selectionBox && (
+            {selectionBox && (
+                <div
+                    className={`fixed pointer-events-none z-50 rounded-md ${
+                        dragMode === 'SELECT'
+                            ? 'border border-cyan-500/60 bg-cyan-500/10'
+                            : 'border-2 border-dashed border-blue-400/80 bg-blue-400/10 shadow-[0_0_0_3px_rgba(96,165,250,0.15)]'
+                    }`}
+                    style={{
+                        left: containerRef.current!.getBoundingClientRect().left + selectionBox.x,
+                        top: containerRef.current!.getBoundingClientRect().top + selectionBox.y,
+                        width: selectionBox.w,
+                        height: selectionBox.h,
+                    }}
+                />
+            )}
 
-                <div className="fixed border border-cyan-500/50 bg-cyan-500/10 pointer-events-none z-50" style={{ left: containerRef.current!.getBoundingClientRect().left + selectionBox.x, top: containerRef.current!.getBoundingClientRect().top + selectionBox.y, width: selectionBox.w, height: selectionBox.h }}/>
-
+            {/* 持久化选区右上角操作浮条 */}
+            {displaySelectionBox && dragMode !== 'SELECT' && selectedNodeIds.size > 0 && (
+                <div
+                    className="fixed z-[60] flex items-center gap-1 px-2 py-1 rounded-lg bg-zinc-900/95 backdrop-blur-xl border border-white/10 shadow-xl shadow-black/40 pointer-events-auto"
+                    style={{
+                        left: containerRef.current!.getBoundingClientRect().left + displaySelectionBox.x + displaySelectionBox.w + 8,
+                        top: containerRef.current!.getBoundingClientRect().top + displaySelectionBox.y,
+                    }}
+                >
+                    <span className="text-[11px] text-zinc-300 px-1.5 font-medium">已选 {selectedNodeIds.size}</span>
+                    {(() => {
+                        // 仅当多选里至少有 2 个带 videoSrc 的节点时显示「合并视频」
+                        const orderedIds = Array.from(selectedNodeIds);
+                        const videoNodes = orderedIds
+                            .map(id => nodes.find(n => n.id === id))
+                            .filter((n): n is NodeData => !!n && !!n.videoSrc);
+                        if (videoNodes.length < 2) return null;
+                        return (
+                            <button
+                                className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-purple-300 hover:bg-purple-500/20 hover:text-purple-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={`按点击顺序拼接 ${videoNodes.length} 段视频为一个长视频（在本机用 ffmpeg）`}
+                                disabled={isMergingVideos}
+                                onClick={async () => {
+                                    const api = (window as any).electronAPI;
+                                    if (!api?.concatVideos) {
+                                        window.alert('视频合并仅在 Electron 桌面端可用');
+                                        return;
+                                    }
+                                    const urls = videoNodes.map(n => n.videoSrc!);
+                                    setIsMergingVideos(true);
+                                    try {
+                                        console.log('[Merge Videos] 顺序:', videoNodes.map(n => n.title));
+                                        console.log('[Merge Videos] urls:', urls);
+                                        const res = await api.concatVideos({ urls });
+                                        if (!res?.ok) {
+                                            console.error('[Merge Videos] failed:', res?.error);
+                                            window.alert(`合并失败：${res?.error || '未知错误'}`);
+                                            return;
+                                        }
+                                        // 用自定义 protocol（tide-media://）让 video 元素能加载本地文件，绕开 Electron 的 file:// 拦截
+                                        const fileUrl = 'tide-media:///' + String(res.outputPath).replace(/\\/g, '/');
+                                        console.log('[Merge Videos] outputPath:', res.outputPath, '→', fileUrl);
+                                        const rightMost = videoNodes.reduce((acc, n) => Math.max(acc, n.x + n.width), -Infinity);
+                                        const top = videoNodes[0].y;
+                                        const baseW = videoNodes[0].width;
+                                        const baseH = videoNodes[0].height;
+                                        pushHistory();
+                                        addNode(NodeType.ORIGINAL_VIDEO, rightMost + 40, top, {
+                                            videoSrc: fileUrl,
+                                            title: `合并_${videoNodes.length}段`,
+                                            width: baseW,
+                                            height: baseH,
+                                        });
+                                    } catch (e: any) {
+                                        console.error('[Merge Videos] exception:', e);
+                                        window.alert(`合并异常：${e?.message || e}`);
+                                    } finally {
+                                        setIsMergingVideos(false);
+                                    }
+                                }}
+                            >
+                                <Icons.Film size={12} />
+                                <span>{isMergingVideos ? '合并中…' : `合并视频 ×${videoNodes.length}`}</span>
+                            </button>
+                        );
+                    })()}
+                    <button
+                        className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-blue-300 hover:bg-blue-500/20 hover:text-blue-200 transition-colors"
+                        title="把选中的节点统一为同一尺寸（取众数作为模板）"
+                        onClick={() => {
+                            pushHistory();
+                            // 取选中节点里最常见的 width 作为目标，找不到就用第一个
+                            const selectedNodes = nodes.filter(n => selectedNodeIds.has(n.id));
+                            if (selectedNodes.length === 0) return;
+                            // 统计众数
+                            const sizeCount = new Map<string, number>();
+                            selectedNodes.forEach(n => {
+                                const k = `${n.width}x${n.height}`;
+                                sizeCount.set(k, (sizeCount.get(k) || 0) + 1);
+                            });
+                            let majorKey = '';
+                            let majorCount = -1;
+                            sizeCount.forEach((v, k) => { if (v > majorCount) { majorCount = v; majorKey = k; } });
+                            const [mw, mh] = majorKey.split('x').map(Number);
+                            console.log(`[Unify Size] ${majorKey} (occurs ${majorCount} times among ${selectedNodes.length} selected)`);
+                            setNodes(prev => prev.map(n => selectedNodeIds.has(n.id) ? { ...n, width: mw, height: mh } : n));
+                        }}
+                    >
+                        <Icons.Crop size={12} />
+                        <span>统一尺寸</span>
+                    </button>
+                    <button
+                        className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors"
+                        title="删除选中节点 (Delete)"
+                        onClick={() => {
+                            pushHistory();
+                            const toDel = nodes.filter(n => selectedNodeIds.has(n.id));
+                            const withContent = toDel.filter(n => n.imageSrc || n.videoSrc);
+                            if (withContent.length > 0) setDeletedNodes(prev => [...prev, ...withContent]);
+                            setNodes(prev => prev.filter(n => !selectedNodeIds.has(n.id)));
+                            setConnections(prev => prev.filter(c => !selectedNodeIds.has(c.sourceId) && !selectedNodeIds.has(c.targetId)));
+                            setSelectedNodeIds(new Set());
+                            setSelectionBox(null);
+                        }}
+                    >
+                        <Icons.Trash2 size={12} />
+                        <span>删除</span>
+                    </button>
+                    <button
+                        className="inline-flex h-7 items-center px-2 rounded text-[11px] text-zinc-300 hover:bg-white/10 transition-colors"
+                        title="取消选择 (Esc)"
+                        onClick={() => { setSelectedNodeIds(new Set()); setSelectionBox(null); }}
+                    >
+                        <Icons.X size={12} />
+                    </button>
+                </div>
             )}
 
             

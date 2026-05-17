@@ -38,21 +38,22 @@ const ConnectionPort: React.FC<{
       {/* Port visual */}
       <div className={`
         relative w-3.5 h-3.5 rounded-full cursor-crosshair
-        transition-all duration-200 ease-out
-        ${isDark 
-          ? 'bg-[#1e1e1e] border border-zinc-600 shadow-[0_2px_4px_rgba(0,0,0,0.3)]' 
-          : 'bg-white border border-gray-300 shadow-[0_2px_4px_rgba(0,0,0,0.1)]'
+        transition-all duration-200 ease-organic
+        ${isDark
+          ? 'bg-[#1e1e1e] border border-zinc-600 shadow-[0_2px_4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.06)]'
+          : 'bg-white border border-zinc-300 shadow-[0_2px_4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.8)]'
         }
-        group-hover/port:scale-125 
+        group-hover/port:scale-[1.35]
         group-hover/port:border-blue-500
-        group-hover/port:shadow-[0_0_8px_rgba(59,130,246,0.5)]
+        group-hover/port:shadow-[0_0_0_4px_rgba(59,130,246,0.18),0_0_12px_rgba(59,130,246,0.55)]
       `}>
         {/* Inner dot */}
         <div className={`
           absolute inset-[3px] rounded-full
-          transition-all duration-200
-          ${isDark ? 'bg-zinc-400' : 'bg-gray-400'}
+          transition-all duration-200 ease-organic
+          ${isDark ? 'bg-zinc-400' : 'bg-zinc-400'}
           group-hover/port:bg-blue-500
+          group-hover/port:scale-110
         `} />
       </div>
     </div>
@@ -114,15 +115,17 @@ const BaseNode: React.FC<BaseNodeProps> = ({
           />
 
           {/* Resize Handle */}
-          <div 
+          <div
               className={`
-                absolute -right-1 -bottom-1 w-5 h-5 cursor-se-resize z-50 
+                absolute -right-1 -bottom-1 w-5 h-5 cursor-se-resize z-50
                 flex items-center justify-center
-                opacity-0 group-hover:opacity-100 transition-opacity duration-200
+                opacity-0 group-hover:opacity-100 transition-all duration-200 ease-organic
+                hover:scale-125
+                ${isDark ? 'text-zinc-500 hover:text-blue-400' : 'text-gray-400 hover:text-blue-500'}
               `}
               onMouseDown={onResizeStart}
           >
-              <svg width="10" height="10" viewBox="0 0 10 10" className={isDark ? 'text-zinc-500' : 'text-gray-400'}>
+              <svg width="10" height="10" viewBox="0 0 10 10" className="transition-colors duration-200">
                 <path d="M9 1L1 9M9 5L5 9M9 9L9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
               </svg>
           </div>

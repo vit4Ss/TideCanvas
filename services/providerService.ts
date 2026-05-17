@@ -12,6 +12,8 @@ export type ProviderType =
     | 'doubao'
     | 'qwen'
     | 'zhipu'
+    | 'qingzhi'
+    | 'vpai'
     | 'custom';
 
 export type ProviderModelType = 'text' | 'image' | 'audio' | 'video';
@@ -64,6 +66,8 @@ export const PROVIDER_TEMPLATES: Record<Exclude<ProviderType, 'global'>, { name:
     doubao:      { name: '豆包',            baseUrl: 'https://ark.cn-beijing.volces.com', description: '字节豆包对话 / 视觉' },
     qwen:        { name: '通义千问',         baseUrl: 'https://dashscope.aliyuncs.com',   description: '阿里云通义系列' },
     zhipu:       { name: '智谱 GLM',        baseUrl: 'https://open.bigmodel.cn',         description: '清华系智谱 AI' },
+    qingzhi:     { name: '青栀 AI',         baseUrl: '',                                 description: 'Veo 视频生成中转网关。请填入实际网关 baseUrl，鉴权用裸 key 不加 Bearer。' },
+    vpai:        { name: 'V-PAI',           baseUrl: 'https://api.gpt.ge',               description: 'V-PAI 视频任务网关，目前接入豆包 Seedance 系列。鉴权用标准 Bearer。' },
     custom:      { name: '自定义',           baseUrl: '',                                 description: '中转 / 私有部署' },
 };
 
@@ -472,8 +476,41 @@ const summarizeCandidate = (candidate: ModelFetchCandidate): string => {
     }
 };
 
+// V-PAI 的静态模型清单（task 网关不开放 /v1/models 接口）
+const VPAI_STATIC_MODELS: ProviderModel[] = [
+    { id: 'doubao-seedance-1-5-pro-251215',      name: '1.5 全能视频模型',        type: 'video', enabled: true },
+    { id: 'doubao-seedance-1-0-pro-250528',      name: '1.0 全能视频模型',        type: 'video', enabled: true },
+    { id: 'doubao-seedance-1-0-pro-fast-251015', name: '1.0 全能视频模型 · 快速', type: 'video', enabled: true },
+    { id: 'doubao-seedance-1-0-lite-t2v-250428', name: '文生视频模型',           type: 'video', enabled: true },
+    { id: 'doubao-seedance-1-0-lite-i2v-250428', name: '首尾帧视频模型',         type: 'video', enabled: true },
+];
+
 // 从服务商的 /v1/models 或 /v1beta/models 拉取可用模型列表
+// 青栀 AI 的静态模型清单（网关只代理 Veo，没有 /v1/models 接口）
+const QINGZHI_STATIC_MODELS: ProviderModel[] = [
+    { id: 'veo2',                  name: 'Veo 2 · Fast 默认',         type: 'video', enabled: true },
+    { id: 'veo2-fast',             name: 'Veo 2 · Fast',              type: 'video', enabled: true },
+    { id: 'veo2-fast-frames',      name: 'Veo 2 · Fast 首尾帧',       type: 'video', enabled: true },
+    { id: 'veo2-fast-components',  name: 'Veo 2 · Fast 多图素材合成', type: 'video', enabled: true },
+    { id: 'veo2-pro',              name: 'Veo 2 · Pro 高质量',        type: 'video', enabled: true },
+    { id: 'veo3',                  name: 'Veo 3 · Fast 带音频',       type: 'video', enabled: true },
+    { id: 'veo3-fast',             name: 'Veo 3 · Fast 带音频',       type: 'video', enabled: true },
+    { id: 'veo3-pro',              name: 'Veo 3 · Pro 超高质量带音频', type: 'video', enabled: true },
+    { id: 'veo3-pro-frames',       name: 'Veo 3 · Pro 首帧 带音频',   type: 'video', enabled: true },
+    { id: 'veo3.1',                name: 'Veo 3.1 · Fast 自适应首帧', type: 'video', enabled: true },
+    { id: 'veo3.1-pro',            name: 'Veo 3.1 · Pro 自适应首帧',  type: 'video', enabled: true },
+];
+
 export const fetchProviderModels = async (provider: Provider, signal?: AbortSignal): Promise<{ ok: boolean; models?: ProviderModel[]; error?: string }> => {
+    // 青栀 AI 网关不开放 /v1/models —— 直接返回我们维护的静态清单（11 个 Veo 变体）
+    if (provider.type === 'qingzhi') {
+        return { ok: true, models: QINGZHI_STATIC_MODELS };
+    }
+    // V-PAI task 网关也不开放 /v1/models —— 返回 Seedance 静态清单
+    if (provider.type === 'vpai') {
+        return { ok: true, models: VPAI_STATIC_MODELS };
+    }
+
     const baseUrl = normalizeModelBaseUrl(provider.baseUrl || '');
     const apiKey = provider.apiKey.trim();
     if (!baseUrl) return { ok: false, error: '未填写 Base URL' };
@@ -506,6 +543,18 @@ export const fetchProviderModels = async (provider: Provider, signal?: AbortSign
 
 // 测试服务商连通性
 export const testProviderConnection = async (provider: Provider, signal?: AbortSignal): Promise<{ ok: boolean; status?: number; error?: string }> => {
+    // 青栀 AI 网关不暴露通用端点，只能验证有没有填关键字段
+    if (provider.type === 'qingzhi') {
+        if (!provider.baseUrl?.trim()) return { ok: false, error: '请填写 Base URL（青栀网关地址）' };
+        if (!provider.apiKey?.trim()) return { ok: false, error: '请填写 API Key' };
+        return { ok: true };
+    }
+    // V-PAI 同上，task 网关无通用 ping 端点
+    if (provider.type === 'vpai') {
+        if (!provider.baseUrl?.trim()) return { ok: false, error: '请填写 Base URL（V-PAI 网关地址）' };
+        if (!provider.apiKey?.trim()) return { ok: false, error: '请填写 API Key' };
+        return { ok: true };
+    }
     const result = await fetchProviderModels(provider, signal);
     if (result.ok) return { ok: true };
     return { ok: false, error: result.error };

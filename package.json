@@ -16,9 +16,10 @@
     "dist:win:portable": "npm run build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@fontsource-variable/inter": "^5.2.8",
     "@google/genai": "^1.37.0",
     "lucide-react": "^0.562.0",
-    "@fontsource-variable/inter": "^5.2.8",
     "react": "^19.2.3",
     "react-dom": "^19.2.3"
   },

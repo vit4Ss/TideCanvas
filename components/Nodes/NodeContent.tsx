@@ -5,6 +5,7 @@ import { TextToVideoNode } from './TextToVideoNode';
 import { StartEndToVideoNode } from './StartEndToVideoNode';
 import { OriginalImageNode } from './OriginalImageNode';
 import { CreativeDescNode } from './CreativeDescNode';
+import { StoryboardNode } from './StoryboardNode';
 import { PanoramaNode } from './PanoramaNode';
 
 interface NodeContentProps {
@@ -16,9 +17,13 @@ interface NodeContentProps {
   selected?: boolean;
   showControls?: boolean;
   inputs?: string[];
+  upstreamText?: string;
+  storyboardUpstream?: { kind: 'text' | 'image'; title: string; content: string; imageSrc?: string }[];
   onMaximize?: (id: string) => void;
   onDownload?: (id: string) => void;
   onUpload?: (nodeId: string) => void;
+  onAddToAssetLibrary?: (nodeId: string) => void | Promise<void>;
+  onSplitImageGrid?: (nodeId: string, presetRows?: number, presetCols?: number) => void | Promise<void>;
   isSelecting?: boolean;
   onDelete?: (id: string) => void;
   isDark?: boolean;
@@ -44,6 +49,8 @@ const NodeContentComponent: React.FC<NodeContentProps> = (props) => {
             return <PanoramaNode {...props} />;
         case NodeType.CREATIVE_DESC:
             return <CreativeDescNode {...props} />;
+        case NodeType.STORYBOARD:
+            return <StoryboardNode {...props} />;
         default:
             return null;
     }
@@ -53,7 +60,20 @@ export const NodeContent = memo(NodeContentComponent, (prev, next) => {
     if (prev.isSelecting !== next.isSelecting) return false;
     if (prev.isDark !== next.isDark) return false;
     if (prev.canvasScale !== next.canvasScale) return false;
-    
+    if (prev.upstreamText !== next.upstreamText) return false;
+    // storyboardUpstream is a fresh array every render; content-aware compare
+    {
+        const a = prev.storyboardUpstream || [];
+        const b = next.storyboardUpstream || [];
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i].kind !== b[i].kind) return false;
+            if (a[i].title !== b[i].title) return false;
+            if (a[i].content !== b[i].content) return false;
+            if (a[i].imageSrc !== b[i].imageSrc) return false;
+        }
+    }
+
     // Check Inputs
     if (prev.inputs !== next.inputs) {
          if (prev.inputs?.length !== next.inputs?.length) return false;

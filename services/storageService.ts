@@ -4,12 +4,13 @@
  */
 
 const DB_NAME = 'canvas_storage_db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_HANDLES = 'handles';
 const STORE_SETTINGS = 'settings';
 const STORE_CACHE = 'cache';
 const STORE_WORKSPACE_META = 'workspaces_meta';
 const STORE_WORKSPACE_DATA = 'workspaces_data';
+const STORE_ASSETS = 'assets';
 
 const KEY_DIR_HANDLE = 'download_dir_handle';
 const KEY_SETTINGS = 'app_settings';
@@ -52,6 +53,19 @@ export interface StorageStats {
     totalUsage: number;
     cacheEntries: number;
     oldestCacheTime: number | null;
+}
+
+// 素材库条目
+export interface AssetEntry {
+    id: string;
+    title: string;
+    src: string; // data URL or remote URL
+    type: 'image' | 'video';
+    createdAt: number;
+    sourceNodeId?: string;
+    sourceNodeType?: string;
+    width?: number;
+    height?: number;
 }
 
 // 画布工作区
@@ -163,6 +177,10 @@ class StorageService {
                 }
                 if (!db.objectStoreNames.contains(STORE_WORKSPACE_DATA)) {
                     db.createObjectStore(STORE_WORKSPACE_DATA, { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains(STORE_ASSETS)) {
+                    const assetStore = db.createObjectStore(STORE_ASSETS, { keyPath: 'id' });
+                    assetStore.createIndex('createdAt', 'createdAt', { unique: false });
                 }
             };
         });
@@ -673,6 +691,75 @@ class StorageService {
         } catch (e) {
             console.error('Failed to delete workspace:', e);
         }
+    }
+
+    // ================== 素材库 ==================
+
+    async addAsset(input: Omit<AssetEntry, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): Promise<AssetEntry> {
+        const entry: AssetEntry = {
+            id: input.id || `asset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            title: input.title,
+            src: input.src,
+            type: input.type,
+            createdAt: input.createdAt || Date.now(),
+            sourceNodeId: input.sourceNodeId,
+            sourceNodeType: input.sourceNodeType,
+            width: input.width,
+            height: input.height,
+        };
+        try {
+            const store = await this.getStore(STORE_ASSETS, 'readwrite');
+            await new Promise<void>((resolve, reject) => {
+                const req = store.put(entry);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
+        } catch (e) {
+            console.error('Failed to add asset:', e);
+            throw e;
+        }
+        return entry;
+    }
+
+    async listAssets(): Promise<AssetEntry[]> {
+        try {
+            const store = await this.getStore(STORE_ASSETS, 'readonly');
+            return new Promise((resolve) => {
+                const req = store.getAll();
+                req.onsuccess = () => {
+                    const list = (req.result || []) as AssetEntry[];
+                    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                    resolve(list);
+                };
+                req.onerror = () => resolve([]);
+            });
+        } catch (e) {
+            return [];
+        }
+    }
+
+    async deleteAsset(id: string): Promise<void> {
+        try {
+            const store = await this.getStore(STORE_ASSETS, 'readwrite');
+            await new Promise<void>((resolve, reject) => {
+                const req = store.delete(id);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
+        } catch (e) {
+            console.error('Failed to delete asset:', e);
+        }
+    }
+
+    async clearAssets(): Promise<void> {
+        try {
+            const store = await this.getStore(STORE_ASSETS, 'readwrite');
+            await new Promise<void>((resolve) => {
+                const req = store.clear();
+                req.onsuccess = () => resolve();
+                req.onerror = () => resolve();
+            });
+        } catch (e) {}
     }
 
     async renameWorkspace(id: string, name: string): Promise<WorkspaceMeta | null> {
