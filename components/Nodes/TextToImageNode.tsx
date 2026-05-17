@@ -9,6 +9,7 @@ import { IMAGE_HANDLERS } from '../../services/mode/image/configurations';
 import { LocalEditableTitle, LocalCustomDropdown, LocalInputThumbnails, LocalMediaStack } from './Shared/LocalNodeComponents';
 import { CameraPanel } from './Shared/CameraPanel';
 import { CameraSelection, formatCameraPrompt } from '../../services/cameraPresets';
+import { storageService } from '../../services/storageService';
 
 const COMMON_RATIOS = ['自适应', '1:1', '9:16', '16:9', '3:4', '4:3', '3:2', '2:3', '4:5', '5:4', '21:9'];
 const COMMON_RESOLUTIONS = ['1k', '2k', '4k'];
@@ -187,19 +188,41 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
 }) => {
     const [savedToLibrary, setSavedToLibrary] = useState(false);
     const [librarySaving, setLibrarySaving] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        const check = async () => {
+            const src = data.imageSrc;
+            if (!src) {
+                if (!cancelled) setSavedToLibrary(false);
+                return;
+            }
+            const found = await storageService.findAssetBySrc(src);
+            if (!cancelled) setSavedToLibrary(!!found);
+        };
+        check();
+        const onUpdate = () => check();
+        window.addEventListener('assetLibraryUpdated', onUpdate);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('assetLibraryUpdated', onUpdate);
+        };
+    }, [data.imageSrc]);
+
     const handleAddToLibrary = useCallback(async () => {
-        if (!onAddToAssetLibrary || librarySaving) return;
+        if (!onAddToAssetLibrary || librarySaving || savedToLibrary) return;
         setLibrarySaving(true);
         try {
             await Promise.resolve(onAddToAssetLibrary(data.id));
+            // 乐观更新：成功后立刻锁住按钮，避免 event → findAssetBySrc 异步回写期间用户再次点击
+            // 后续 'assetLibraryUpdated' 监听器还会再校准一次，两路殊途同归
             setSavedToLibrary(true);
-            setTimeout(() => setSavedToLibrary(false), 1500);
         } catch (e) {
             console.error('Add to library failed:', e);
         } finally {
             setLibrarySaving(false);
         }
-    }, [data.id, onAddToAssetLibrary, librarySaving]);
+    }, [data.id, onAddToAssetLibrary, librarySaving, savedToLibrary]);
     const [cameraOpen, setCameraOpen] = useState<'panel' | 'modal' | null>(null);
 
     const handleCameraApply = useCallback((sel: CameraSelection) => {
@@ -447,12 +470,12 @@ export const TextToImageNode: React.FC<TextToImageNodeProps> = ({
         <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onClick?.(); }}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all duration-150 active:scale-[0.97] ${ghostIconBtn}`}
+            className={`press inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors duration-150 ${ghostIconBtn}`}
         >
             {Icon && <Icon size={14} />}
             <span className="whitespace-nowrap">{label}</span>
             {badge && (
-                <span className="inline-flex h-4 items-center rounded px-1.5 text-[9px] font-bold uppercase bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm shadow-blue-500/30">
+                <span className="inline-flex h-[15px] items-center rounded-[5px] px-1.5 text-[9px] font-bold uppercase tracking-wide bg-gradient-to-br from-sky-400 via-blue-500 to-indigo-500 text-white shadow-sm shadow-blue-500/40 ring-1 ring-inset ring-white/20">
                     {badge}
                 </span>
             )}

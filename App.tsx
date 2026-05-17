@@ -446,6 +446,9 @@ const CanvasWithSidebar: React.FC = () => {
 
       outputArtifacts: n.outputArtifacts ? [...n.outputArtifacts] : undefined,
 
+      // 撤销/重做不应恢复"生成中"状态：原生成已脱离当前轨迹，恢复 isLoading=true 会让节点永久卡在 loading
+      isLoading: false,
+
     })));
 
     setConnections(snapshot.connections.map(c => ({ ...c })));
@@ -1674,9 +1677,10 @@ const CanvasWithSidebar: React.FC = () => {
 
       if (withContent.length > 0) setDeletedNodes(prev => [...prev, ...withContent]);
 
-      
 
-      setNodes(data.nodes);
+
+      // 清掉外部数据里残留的 isLoading（保存期间生成还没完成会留下这个 flag，导致重新加载后卡在"生成中"）
+      setNodes((data.nodes || []).map(n => n.isLoading ? { ...n, isLoading: false } : n));
 
       setConnections(data.connections);
 
@@ -1980,11 +1984,13 @@ const CanvasWithSidebar: React.FC = () => {
       setTimeout(() => handleGenerate(newNode.id), 50);
   };
 
-  const handleGeneratePanorama = (nodeId: string) => {
+  const handleGeneratePanorama = async (nodeId: string) => {
 
       const node = workspaceStateRef.current.nodes.find(n => n.id === nodeId);
 
-      if (!node?.imageSrc) {
+      const sourceImageSrc = node?.imageSrc;
+
+      if (!node || !sourceImageSrc) {
 
           alert('请先选择一张图片');
 
@@ -1992,29 +1998,28 @@ const CanvasWithSidebar: React.FC = () => {
 
       }
 
-      const nextIndex = (label: string) => {
-
-          const used = workspaceStateRef.current.nodes
-
-              .map(n => n.title)
-
-              .filter(title => title && title.startsWith(label))
-
-              .map(title => parseInt(title.slice(label.length).trim(), 10))
-
+      const computeNextIndex = (titles: string[], label: string) => {
+          const used = titles
+              .filter(t => t && t.startsWith(label))
+              .map(t => parseInt(t.slice(label.length).trim(), 10))
               .filter(n => Number.isFinite(n));
-
           return (used.length ? Math.max(...used) : 0) + 1;
-
       };
 
-      const width = Math.max(640, node.width);
+      // 复用源节点的模型与 key：'Banana Pro Edit' 等 handler 没注册到 MODEL_REGISTRY，
+      // 直接用会拿到 fallback config（modelId 为空、依赖全局 key），多数情况下生成失败。
+      // 用户已经能在源节点跑生成，说明 source.model 已配置好，直接复用最稳妥。
+      const panoModel = node.model || 'BananaPro';
+      // 16:9 是所有主流图片模型都支持的最宽比例；21:9 只有 'Banana Pro Edit' 一家走得通，
+      // 其它模型会回落到 1:1，反而出来个方图，不如老老实实用 16:9。
+      const PANO_RATIO = '16:9';
+      const width = Math.max(720, node.width);
+      const height = Math.max(405, Math.round(width * 9 / 16));
 
-      const height = Math.max(360, Math.round(width * 9 / 16));
+      const newNodeId = generateId();
+      const newNodeBase: Omit<NodeData, 'title'> = {
 
-      const newNode: NodeData = {
-
-          id: generateId(),
+          id: newNodeId,
 
           type: NodeType.PANORAMA_360,
 
@@ -2026,29 +2031,66 @@ const CanvasWithSidebar: React.FC = () => {
 
           height,
 
-          title: `全景 ${nextIndex('全景')}`,
+          aspectRatio: PANO_RATIO,
 
-          aspectRatio: '16:9',
+          model: panoModel,
 
-          model: '',
-
-          resolution: node.resolution || '1k',
+          resolution: node.resolution || '2k',
 
           count: 1,
 
           prompt: node.prompt || '',
 
-          imageSrc: node.imageSrc,
+          imageSrc: undefined,
 
-          outputArtifacts: [node.imageSrc],
+          outputArtifacts: [],
+
+          isLoading: true,
 
       };
 
       pushHistory();
 
-      setNodes(prev => [...prev, newNode]);
+      // 标题计算放进 setNodes 回调，基于最新 prev 排序，
+      // 避免连点两次"全景"时两边都用 workspaceStateRef 旧快照得到同样的"全景 1"
+      setNodes(prev => {
+          const title = `全景 ${computeNextIndex(prev.map(n => n.title), '全景')}`;
+          return [...prev, { ...newNodeBase, title }];
+      });
 
-      setSelectedNodeIds(new Set([newNode.id]));
+      setSelectedNodeIds(new Set([newNodeId]));
+
+      const userPrompt = (node.prompt || '').trim();
+      const panoPrompt = [
+          userPrompt,
+          'Reframe this scene as a wide cinematic 360° panorama view: ultra-wide horizontal field of view, level horizon line centered vertically, natural perspective without fisheye distortion, consistent lighting and style with the reference image.',
+      ].filter(Boolean).join('\n\n');
+
+      try {
+          const results = await generateImage(
+              panoPrompt,
+              PANO_RATIO,
+              panoModel,
+              newNodeBase.resolution || '2k',
+              1,
+              [sourceImageSrc],
+              false,
+          );
+          if (!results || results.length === 0) throw new Error('未返回结果');
+          updateNodeData(newNodeId, {
+              imageSrc: results[0],
+              outputArtifacts: [results[0]],
+              isLoading: false,
+          });
+      } catch (e: any) {
+          console.error('[Panorama] generation failed', {
+              sourceNodeId: nodeId,
+              errorMessage: e?.message,
+              cause: e?.cause,
+          });
+          alert(`全景生成失败: ${e?.message || e}`);
+          updateNodeData(newNodeId, { isLoading: false });
+      }
 
   };
 
@@ -2264,7 +2306,8 @@ const CanvasWithSidebar: React.FC = () => {
   const libraryImportRef = useRef<HTMLInputElement>(null);
 
   const handleLibraryImportFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    // tsconfig 引入了 'node' types，FileList 推断回退到 unknown[]，所以显式断言到 File[]
+    const files = Array.from(e.target.files || []) as File[];
     e.target.value = '';
     if (files.length === 0) return;
     for (const file of files) {
@@ -2509,7 +2552,8 @@ const CanvasWithSidebar: React.FC = () => {
 
   }) => {
 
-    setNodes(data.nodes || []);
+    // 清掉持久化时残留的 isLoading（生成中途被自动保存的节点重新加载后不应继续显示"生成中"）
+    setNodes((data.nodes || []).map(n => n.isLoading ? { ...n, isLoading: false } : n));
 
     setConnections(data.connections || []);
 
@@ -2755,7 +2799,7 @@ const CanvasWithSidebar: React.FC = () => {
 
             if (data.nodes && data.connections) {
 
-                setNodes(data.nodes);
+                setNodes((data.nodes as NodeData[]).map(n => n.isLoading ? { ...n, isLoading: false } : n));
 
                 setConnections(data.connections);
 
@@ -3455,23 +3499,25 @@ const CanvasWithSidebar: React.FC = () => {
 
       return (
 
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowClearCanvasDialog(false)}>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 backdrop-blur-md animate-in fade-in duration-200 ease-organic" onClick={() => setShowClearCanvasDialog(false)}>
 
-            <div className={`w-[400px] p-6 rounded-2xl shadow-2xl border flex flex-col gap-4 transform transition-all scale-100 ${isDark ? 'bg-[#1A1D21] border-zinc-700 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`} onClick={(e) => e.stopPropagation()}>
+            <div className={`surface-panel w-[400px] p-6 rounded-2xl flex flex-col gap-4 animate-in zoom-in-95 fade-in duration-200 ease-organic ${isDark ? 'text-gray-200' : 'text-gray-800'}`} onClick={(e) => e.stopPropagation()}>
 
                 <div>
 
-                    <h3 className="text-lg font-bold flex items-center gap-2"><Icons.Trash2 size={20} className="text-red-500"/>清空当前画布</h3>
+                    <h3 className="text-lg font-bold flex items-center gap-2 tracking-tight"><Icons.Trash2 size={20} className="text-red-500"/>清空当前画布</h3>
 
                     <p className={`text-xs mt-2 leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>将清空当前画布上的全部节点与连线，共 {totalCount} 个节点{withContentCount > 0 ? `（含 ${withContentCount} 个生成结果，可在历史中找回）` : ''}。<br/>项目名称会保留，本操作可通过 Ctrl+Z 撤销。</p>
 
                 </div>
 
-                <div className={`flex justify-end gap-2 mt-2 pt-4 border-t ${isDark ? 'border-zinc-800' : 'border-gray-100'}`}>
+                <div className="divider-soft" />
 
-                    <button onClick={() => setShowClearCanvasDialog(false)} className={`px-4 py-2 rounded-lg text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600'}`}>取消</button>
+                <div className="flex justify-end gap-2">
 
-                    <button onClick={handleConfirmClearCanvas} className={`px-4 py-2 rounded-lg text-xs font-bold text-white transition-colors shadow-lg shadow-red-500/20 flex items-center gap-1.5 ${isDark ? 'bg-red-600 hover:bg-red-500' : 'bg-red-500 hover:bg-red-400'}`}><Icons.Trash2 size={14}/>清空</button>
+                    <button onClick={() => setShowClearCanvasDialog(false)} className={`press px-4 py-2 rounded-lg text-xs font-medium transition-colors ${isDark ? 'hover:bg-white/[0.06] text-gray-400' : 'hover:bg-black/[0.04] text-gray-600'}`}>取消</button>
+
+                    <button onClick={handleConfirmClearCanvas} className={`press px-4 py-2 rounded-lg text-xs font-bold text-white transition-colors shadow-md shadow-red-500/30 flex items-center gap-1.5 ${isDark ? 'bg-red-600 hover:bg-red-500' : 'bg-red-500 hover:bg-red-400'}`}><Icons.Trash2 size={14}/>清空</button>
 
                 </div>
 
@@ -3491,25 +3537,27 @@ const CanvasWithSidebar: React.FC = () => {
 
       return (
 
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowNewWorkflowDialog(false)}>
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 backdrop-blur-md animate-in fade-in duration-200 ease-organic" onClick={() => setShowNewWorkflowDialog(false)}>
 
-            <div className={`w-[400px] p-6 rounded-2xl shadow-2xl border flex flex-col gap-4 transform transition-all scale-100 ${isDark ? 'bg-[#1A1D21] border-zinc-700 text-gray-200' : 'bg-white border-gray-200 text-gray-800'}`} onClick={(e) => e.stopPropagation()}>
+            <div className={`surface-panel w-[400px] p-6 rounded-2xl flex flex-col gap-4 animate-in zoom-in-95 fade-in duration-200 ease-organic ${isDark ? 'text-gray-200' : 'text-gray-800'}`} onClick={(e) => e.stopPropagation()}>
 
                 <div>
 
-                    <h3 className="text-lg font-bold flex items-center gap-2"><Icons.FilePlus size={20} className="text-blue-500"/>新建工作流</h3>
+                    <h3 className="text-lg font-bold flex items-center gap-2 tracking-tight"><Icons.FilePlus size={20} className="text-blue-500"/>新建工作流</h3>
 
                     <p className={`text-xs mt-2 leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>是否在创建新工作流之前保存当前工作流？<br/>任何未保存的更改将永久丢失。</p>
 
                 </div>
 
-                <div className={`flex justify-end gap-2 mt-2 pt-4 border-t ${isDark ? 'border-zinc-800' : 'border-gray-100'}`}>
+                <div className="divider-soft" />
 
-                    <button onClick={() => setShowNewWorkflowDialog(false)} className={`px-4 py-2 rounded-lg text-xs font-medium transition-colors ${isDark ? 'hover:bg-zinc-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600'}`}>取消</button>
+                <div className="flex justify-end gap-2">
 
-                    <button onClick={() => handleConfirmNew(false)} className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors ${isDark ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20' : 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'}`}>不保存</button>
+                    <button onClick={() => setShowNewWorkflowDialog(false)} className={`press px-4 py-2 rounded-lg text-xs font-medium transition-colors ${isDark ? 'hover:bg-white/[0.06] text-gray-400' : 'hover:bg-black/[0.04] text-gray-600'}`}>取消</button>
 
-                    <button onClick={() => handleConfirmNew(true)} className={`px-4 py-2 rounded-lg text-xs font-bold text-white transition-colors shadow-lg shadow-blue-500/20 flex items-center gap-1.5 ${isDark ? 'bg-blue-600 hover:bg-blue-500' : 'bg-blue-500 hover:bg-blue-400'}`}><Icons.Save size={14}/>保存并新建</button>
+                    <button onClick={() => handleConfirmNew(false)} className={`press px-4 py-2 rounded-lg text-xs font-bold transition-colors ring-1 ring-inset ${isDark ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 ring-red-500/20' : 'bg-red-50 text-red-600 hover:bg-red-100 ring-red-200'}`}>不保存</button>
+
+                    <button onClick={() => handleConfirmNew(true)} className={`press px-4 py-2 rounded-lg text-xs font-bold text-white transition-colors shadow-md shadow-blue-500/30 flex items-center gap-1.5 ${isDark ? 'bg-blue-600 hover:bg-blue-500' : 'bg-blue-500 hover:bg-blue-400'}`}><Icons.Save size={14}/>保存并新建</button>
 
                 </div>
 
@@ -3535,35 +3583,19 @@ const CanvasWithSidebar: React.FC = () => {
 
     const top = typeof window === 'undefined' ? contextMenu.y : Math.min(contextMenu.y, window.innerHeight - menuHeight - 12);
 
-    const surfaceClass = `fixed z-50 w-[220px] rounded-[18px] border px-3 py-3 flex flex-col shadow-2xl animate-in fade-in zoom-in-95 duration-100 ${
+    const surfaceClass = `surface-panel fixed z-50 w-[220px] rounded-[18px] px-3 py-3 flex flex-col animate-in fade-in zoom-in-95 duration-150 ease-organic`;
 
-        isDark
+    const dividerClass = `h-px my-2 ${isDark ? 'bg-white/[0.07]' : 'bg-gray-100'}`;
 
-            ? 'bg-zinc-950/95 border-white/10 shadow-black/40'
-
-            : 'bg-white border-gray-100 shadow-gray-300/60'
-
-    }`;
-
-    const dividerClass = `h-px my-2 ${isDark ? 'bg-white/10' : 'bg-gray-100'}`;
-
-    const shortcutClass = `ml-auto text-xs tabular-nums ${isDark ? 'text-zinc-600' : 'text-gray-300'}`;
+    const shortcutClass = `ml-auto text-xs tabular-nums ${isDark ? 'text-zinc-500' : 'text-gray-400'}`;
 
     const submenuWidth = 240;
 
     const openSubmenuToLeft = typeof window !== 'undefined' && left + menuWidth + submenuWidth + 12 > window.innerWidth;
 
-    const submenuOuterClass = `absolute top-[-92px] ${openSubmenuToLeft ? 'right-full pr-2' : 'left-full pl-2'} opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150`;
+    const submenuOuterClass = `absolute top-[-92px] ${openSubmenuToLeft ? 'right-full pr-2' : 'left-full pl-2'} opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 ease-organic`;
 
-    const submenuSurfaceClass = `w-[240px] rounded-[18px] border px-4 py-4 shadow-2xl ${
-
-        isDark
-
-            ? 'bg-zinc-950/95 border-white/10 shadow-black/40'
-
-            : 'bg-white border-gray-100 shadow-gray-300/60'
-
-    }`;
+    const submenuSurfaceClass = `surface-panel w-[240px] rounded-[18px] px-4 py-4`;
 
     const MenuItem = ({ label, shortcut, onClick, disabled, danger }: { label: string; shortcut?: string; onClick?: () => void; disabled?: boolean; danger?: boolean }) => (
 
@@ -3575,7 +3607,7 @@ const CanvasWithSidebar: React.FC = () => {
 
             onClick={onClick}
 
-            className={`flex h-11 items-center rounded-xl px-2 text-sm transition-colors ${
+            className={`press flex h-10 items-center rounded-lg px-2.5 text-[13px] font-medium transition-colors duration-150 ${
 
                 disabled
 
@@ -3583,9 +3615,9 @@ const CanvasWithSidebar: React.FC = () => {
 
                     : danger
 
-                        ? (isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50')
+                        ? (isDark ? 'text-red-400 hover:bg-red-500/15' : 'text-red-600 hover:bg-red-50')
 
-                        : (isDark ? 'text-zinc-200 hover:bg-white/10' : 'text-gray-800 hover:bg-gray-50')
+                        : (isDark ? 'text-zinc-200 hover:bg-white/[0.08]' : 'text-gray-800 hover:bg-black/[0.04]')
 
             }`}
 
@@ -3820,17 +3852,9 @@ const CanvasWithSidebar: React.FC = () => {
 
     const top = typeof window === 'undefined' ? quickAddMenu.y : Math.min(quickAddMenu.y, window.innerHeight - menuHeight - 12);
 
-    const surfaceClass = `fixed z-50 w-[240px] rounded-[18px] border px-4 py-4 flex flex-col shadow-2xl animate-in fade-in zoom-in-95 duration-100 ${
+    const surfaceClass = `surface-panel fixed z-50 w-[240px] rounded-[18px] px-4 py-4 flex flex-col animate-in fade-in zoom-in-95 duration-150 ease-organic`;
 
-        isDark
-
-            ? 'bg-zinc-950/95 border-white/10 shadow-black/40'
-
-            : 'bg-white border-gray-100 shadow-gray-300/60'
-
-    }`;
-
-    const sectionTitleClass = `px-1.5 py-2 text-sm ${isDark ? 'text-zinc-500' : 'text-gray-500'}`;
+    const sectionTitleClass = `px-1.5 py-2 text-[11px] font-semibold uppercase tracking-wider ${isDark ? 'text-zinc-500' : 'text-gray-500'}`;
 
     const QuickAddItem = ({ icon: Icon, label, type, beta, disabled, onClick }: { icon: any; label: string; type?: NodeType; beta?: boolean; disabled?: boolean; onClick?: () => void }) => (
 
@@ -3840,13 +3864,13 @@ const CanvasWithSidebar: React.FC = () => {
 
             disabled={disabled}
 
-            className={`flex h-[52px] w-full items-center gap-3 rounded-xl px-1.5 text-sm font-medium transition-colors ${
+            className={`press group flex h-[52px] w-full items-center gap-3 rounded-xl px-1.5 text-sm font-medium transition-colors duration-150 ${
 
                 disabled
 
                     ? (isDark ? 'text-zinc-700 cursor-not-allowed' : 'text-gray-300 cursor-not-allowed')
 
-                    : (isDark ? 'text-zinc-100 hover:bg-white/10' : 'text-gray-800 hover:bg-gray-50')
+                    : (isDark ? 'text-zinc-100 hover:bg-white/[0.08]' : 'text-gray-800 hover:bg-black/[0.04]')
 
             }`}
 
@@ -3862,9 +3886,13 @@ const CanvasWithSidebar: React.FC = () => {
 
         >
 
-            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset transition-colors duration-150 ${
 
-                isDark ? 'bg-white/10' : 'bg-gray-100'
+                disabled
+
+                    ? (isDark ? 'bg-white/[0.04] ring-white/[0.04]' : 'bg-gray-50 ring-black/[0.03]')
+
+                    : (isDark ? 'bg-white/[0.08] ring-white/[0.06] group-hover:bg-white/[0.12]' : 'bg-gray-100 ring-black/[0.04] group-hover:bg-gray-200/70')
 
             }`}>
 
@@ -3876,9 +3904,9 @@ const CanvasWithSidebar: React.FC = () => {
 
             {beta && (
 
-                <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                <span className={`ml-auto rounded px-1.5 py-0.5 text-[10px] font-semibold ${
 
-                    isDark ? 'bg-white/10 text-zinc-500' : 'bg-gray-100 text-gray-400'
+                    isDark ? 'bg-white/[0.08] text-zinc-400' : 'bg-gray-100 text-gray-500'
 
                 }`}>
 
@@ -4660,83 +4688,77 @@ const CanvasWithSidebar: React.FC = () => {
                 />
             )}
 
-            {/* 持久化选区右上角操作浮条 */}
-            {displaySelectionBox && dragMode !== 'SELECT' && selectedNodeIds.size > 0 && (
+            {/* 持久化选区右上角操作浮条 —— 仅多选 ≥2 个视频节点时显示 */}
+            {(() => {
+                if (!displaySelectionBox || dragMode === 'SELECT' || selectedNodeIds.size === 0) return null;
+                const orderedIds = Array.from(selectedNodeIds);
+                const videoNodes = orderedIds
+                    .map(id => nodes.find(n => n.id === id))
+                    .filter((n): n is NodeData => !!n && !!n.videoSrc);
+                if (videoNodes.length < 2) return null;
+                const videoIdSet = new Set(videoNodes.map(n => n.id));
+                return (
                 <div
-                    className="fixed z-[60] flex items-center gap-1 px-2 py-1 rounded-lg bg-zinc-900/95 backdrop-blur-xl border border-white/10 shadow-xl shadow-black/40 pointer-events-auto"
+                    className="surface-chip fixed z-[60] flex items-center gap-0.5 px-1.5 py-1 rounded-xl pointer-events-auto animate-in fade-in zoom-in-95 duration-200 ease-organic"
                     style={{
                         left: containerRef.current!.getBoundingClientRect().left + displaySelectionBox.x + displaySelectionBox.w + 8,
                         top: containerRef.current!.getBoundingClientRect().top + displaySelectionBox.y,
                     }}
                 >
-                    <span className="text-[11px] text-zinc-300 px-1.5 font-medium">已选 {selectedNodeIds.size}</span>
-                    {(() => {
-                        // 仅当多选里至少有 2 个带 videoSrc 的节点时显示「合并视频」
-                        const orderedIds = Array.from(selectedNodeIds);
-                        const videoNodes = orderedIds
-                            .map(id => nodes.find(n => n.id === id))
-                            .filter((n): n is NodeData => !!n && !!n.videoSrc);
-                        if (videoNodes.length < 2) return null;
-                        return (
-                            <button
-                                className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-purple-300 hover:bg-purple-500/20 hover:text-purple-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={`按点击顺序拼接 ${videoNodes.length} 段视频为一个长视频（在本机用 ffmpeg）`}
-                                disabled={isMergingVideos}
-                                onClick={async () => {
-                                    const api = (window as any).electronAPI;
-                                    if (!api?.concatVideos) {
-                                        window.alert('视频合并仅在 Electron 桌面端可用');
-                                        return;
-                                    }
-                                    const urls = videoNodes.map(n => n.videoSrc!);
-                                    setIsMergingVideos(true);
-                                    try {
-                                        console.log('[Merge Videos] 顺序:', videoNodes.map(n => n.title));
-                                        console.log('[Merge Videos] urls:', urls);
-                                        const res = await api.concatVideos({ urls });
-                                        if (!res?.ok) {
-                                            console.error('[Merge Videos] failed:', res?.error);
-                                            window.alert(`合并失败：${res?.error || '未知错误'}`);
-                                            return;
-                                        }
-                                        // 用自定义 protocol（tide-media://）让 video 元素能加载本地文件，绕开 Electron 的 file:// 拦截
-                                        const fileUrl = 'tide-media:///' + String(res.outputPath).replace(/\\/g, '/');
-                                        console.log('[Merge Videos] outputPath:', res.outputPath, '→', fileUrl);
-                                        const rightMost = videoNodes.reduce((acc, n) => Math.max(acc, n.x + n.width), -Infinity);
-                                        const top = videoNodes[0].y;
-                                        const baseW = videoNodes[0].width;
-                                        const baseH = videoNodes[0].height;
-                                        pushHistory();
-                                        addNode(NodeType.ORIGINAL_VIDEO, rightMost + 40, top, {
-                                            videoSrc: fileUrl,
-                                            title: `合并_${videoNodes.length}段`,
-                                            width: baseW,
-                                            height: baseH,
-                                        });
-                                    } catch (e: any) {
-                                        console.error('[Merge Videos] exception:', e);
-                                        window.alert(`合并异常：${e?.message || e}`);
-                                    } finally {
-                                        setIsMergingVideos(false);
-                                    }
-                                }}
-                            >
-                                <Icons.Film size={12} />
-                                <span>{isMergingVideos ? '合并中…' : `合并视频 ×${videoNodes.length}`}</span>
-                            </button>
-                        );
-                    })()}
+                    <span className="text-[11px] text-zinc-300 px-2 py-1 font-medium tabular-nums">已选 {selectedNodeIds.size}</span>
+                    <span className="w-px h-4 bg-white/10 mx-0.5" />
                     <button
-                        className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-blue-300 hover:bg-blue-500/20 hover:text-blue-200 transition-colors"
-                        title="把选中的节点统一为同一尺寸（取众数作为模板）"
+                        className="press inline-flex h-7 items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-medium text-purple-300 hover:bg-purple-500/20 hover:text-purple-200 transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={`按点击顺序拼接 ${videoNodes.length} 段视频为一个长视频（在本机用 ffmpeg）`}
+                        disabled={isMergingVideos}
+                        onClick={async () => {
+                            const api = (window as any).electronAPI;
+                            if (!api?.concatVideos) {
+                                window.alert('视频合并仅在 Electron 桌面端可用');
+                                return;
+                            }
+                            const urls = videoNodes.map(n => n.videoSrc!);
+                            setIsMergingVideos(true);
+                            try {
+                                console.log('[Merge Videos] 顺序:', videoNodes.map(n => n.title));
+                                console.log('[Merge Videos] urls:', urls);
+                                const res = await api.concatVideos({ urls });
+                                if (!res?.ok) {
+                                    console.error('[Merge Videos] failed:', res?.error);
+                                    window.alert(`合并失败：${res?.error || '未知错误'}`);
+                                    return;
+                                }
+                                // 用自定义 protocol（tide-media://）让 video 元素能加载本地文件，绕开 Electron 的 file:// 拦截
+                                const fileUrl = 'tide-media:///' + String(res.outputPath).replace(/\\/g, '/');
+                                console.log('[Merge Videos] outputPath:', res.outputPath, '→', fileUrl);
+                                const rightMost = videoNodes.reduce((acc, n) => Math.max(acc, n.x + n.width), -Infinity);
+                                const top = videoNodes[0].y;
+                                const baseW = videoNodes[0].width;
+                                const baseH = videoNodes[0].height;
+                                pushHistory();
+                                addNode(NodeType.ORIGINAL_VIDEO, rightMost + 40, top, {
+                                    videoSrc: fileUrl,
+                                    title: `合并_${videoNodes.length}段`,
+                                    width: baseW,
+                                    height: baseH,
+                                });
+                            } catch (e: any) {
+                                console.error('[Merge Videos] exception:', e);
+                                window.alert(`合并异常：${e?.message || e}`);
+                            } finally {
+                                setIsMergingVideos(false);
+                            }
+                        }}
+                    >
+                        <Icons.Film size={12} />
+                        <span>{isMergingVideos ? '合并中…' : `合并视频 ×${videoNodes.length}`}</span>
+                    </button>
+                    <button
+                        className="press inline-flex h-7 items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-medium text-blue-300 hover:bg-blue-500/20 hover:text-blue-200 transition-colors duration-150"
+                        title={`把选中的 ${videoNodes.length} 个视频节点统一为同一尺寸（取众数作为模板）`}
                         onClick={() => {
-                            pushHistory();
-                            // 取选中节点里最常见的 width 作为目标，找不到就用第一个
-                            const selectedNodes = nodes.filter(n => selectedNodeIds.has(n.id));
-                            if (selectedNodes.length === 0) return;
-                            // 统计众数
                             const sizeCount = new Map<string, number>();
-                            selectedNodes.forEach(n => {
+                            videoNodes.forEach(n => {
                                 const k = `${n.width}x${n.height}`;
                                 sizeCount.set(k, (sizeCount.get(k) || 0) + 1);
                             });
@@ -4744,15 +4766,26 @@ const CanvasWithSidebar: React.FC = () => {
                             let majorCount = -1;
                             sizeCount.forEach((v, k) => { if (v > majorCount) { majorCount = v; majorKey = k; } });
                             const [mw, mh] = majorKey.split('x').map(Number);
-                            console.log(`[Unify Size] ${majorKey} (occurs ${majorCount} times among ${selectedNodes.length} selected)`);
-                            setNodes(prev => prev.map(n => selectedNodeIds.has(n.id) ? { ...n, width: mw, height: mh } : n));
+                            if (!Number.isFinite(mw) || !Number.isFinite(mh) || mw <= 0 || mh <= 0) {
+                                console.warn(`[Unify Size] invalid majorKey="${majorKey}" → skip`);
+                                return;
+                            }
+                            // 所有视频已经是同一尺寸时跳过：避免空操作污染撤销栈
+                            if (videoNodes.every(n => n.width === mw && n.height === mh)) {
+                                console.log('[Unify Size] all already match', majorKey);
+                                return;
+                            }
+                            pushHistory();
+                            console.log(`[Unify Size] ${majorKey} (occurs ${majorCount} times among ${videoNodes.length} video nodes)`);
+                            setNodes(prev => prev.map(n => videoIdSet.has(n.id) ? { ...n, width: mw, height: mh } : n));
                         }}
                     >
                         <Icons.Crop size={12} />
                         <span>统一尺寸</span>
                     </button>
+                    <span className="w-px h-4 bg-white/10 mx-0.5" />
                     <button
-                        className="inline-flex h-7 items-center gap-1 px-2 rounded text-[11px] text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors"
+                        className="press inline-flex h-7 items-center gap-1.5 px-2.5 rounded-lg text-[11px] font-medium text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors duration-150"
                         title="删除选中节点 (Delete)"
                         onClick={() => {
                             pushHistory();
@@ -4769,14 +4802,15 @@ const CanvasWithSidebar: React.FC = () => {
                         <span>删除</span>
                     </button>
                     <button
-                        className="inline-flex h-7 items-center px-2 rounded text-[11px] text-zinc-300 hover:bg-white/10 transition-colors"
+                        className="press inline-flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 hover:bg-white/10 hover:text-zinc-200 transition-colors duration-150"
                         title="取消选择 (Esc)"
                         onClick={() => { setSelectedNodeIds(new Set()); setSelectionBox(null); }}
                     >
                         <Icons.X size={12} />
                     </button>
                 </div>
-            )}
+                );
+            })()}
 
             
 
@@ -4784,21 +4818,13 @@ const CanvasWithSidebar: React.FC = () => {
 
             <div className="absolute top-4 left-4 z-50">
 
-                <div className={`flex items-center gap-2.5 px-2 py-1.5 rounded-2xl backdrop-blur-xl border transition-all duration-300 ${
-
-                    isDark 
-
-                        ? 'bg-[#18181b]/90 border-zinc-800 shadow-xl' 
-
-                        : 'bg-white/90 border-gray-200 shadow-lg'
-
-                }`}>
+                <div className="surface-chip flex items-center gap-2.5 px-2 py-1.5 rounded-2xl transition-all duration-300 ease-organic">
 
                     {/* Logo */}
 
-                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ring-1 ring-inset ${
 
-                        isDark ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-100 text-blue-600'
+                        isDark ? 'bg-gradient-to-br from-blue-500/25 to-blue-500/10 text-blue-300 ring-blue-400/20' : 'bg-gradient-to-br from-blue-100 to-blue-50 text-blue-600 ring-blue-200/60'
 
                     }`}>
 
@@ -4890,15 +4916,9 @@ const CanvasWithSidebar: React.FC = () => {
 
                 )}
 
-                <div className={`flex items-center gap-0.5 px-1.5 py-1 rounded-2xl backdrop-blur-xl border transition-all ${
+                <div className="surface-chip flex items-center gap-0.5 px-1.5 py-1 rounded-2xl transition-all ease-organic">
 
-                    isDark
 
-                        ? 'bg-[#18181b]/90 border-zinc-800 shadow-xl'
-
-                        : 'bg-white/95 border-gray-200 shadow-lg'
-
-                }`}>
 
                     {/* 整理画布 */}
 
@@ -5064,13 +5084,13 @@ const CanvasWithSidebar: React.FC = () => {
 
             {previewMedia && (
 
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md animate-in fade-in duration-200" onClick={() => setPreviewMedia(null)}>
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 backdrop-blur-lg animate-in fade-in duration-200 ease-organic" onClick={() => setPreviewMedia(null)}>
 
-                    <div className="relative max-w-[90vw] max-h-[90vh] bg-black rounded-lg shadow-2xl overflow-hidden border border-zinc-700" onClick={(e) => e.stopPropagation()}>
+                    <div className="relative max-w-[92vw] max-h-[92vh] bg-black/40 rounded-2xl shadow-2xl overflow-hidden ring-1 ring-white/10 animate-in zoom-in-95 fade-in duration-300 ease-organic" onClick={(e) => e.stopPropagation()}>
 
-                         <button className="absolute top-2 right-2 bg-black/50 text-white p-2 rounded-full hover:bg-red-500 transition-colors z-10" onClick={() => setPreviewMedia(null)}><Icons.X size={20} /></button>
+                         <button className="press absolute top-3 right-3 bg-black/55 backdrop-blur-md text-white p-2 rounded-full hover:bg-red-500 transition-colors duration-150 z-10 ring-1 ring-inset ring-white/15 shadow-md" onClick={() => setPreviewMedia(null)}><Icons.X size={20} /></button>
 
-                         {previewMedia.type === 'video' ? <video src={previewMedia.url} controls autoPlay className="max-w-full max-h-[90vh]" /> : <img src={previewMedia.url} alt="Preview" className="max-w-full max-h-[90vh] object-contain" />}
+                         {previewMedia.type === 'video' ? <video src={previewMedia.url} controls autoPlay className="max-w-full max-h-[92vh]" /> : <img src={previewMedia.url} alt="Preview" className="max-w-full max-h-[92vh] object-contain" />}
 
                     </div>
 

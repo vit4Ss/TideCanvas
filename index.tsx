@@ -6,8 +6,15 @@ import App from './App';
 
 console.log('[DEBUG] index.tsx is running');
 
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
-  constructor(props: any) {
+type ErrorBoundaryProps = { children: React.ReactNode };
+type ErrorBoundaryState = { hasError: boolean; error: any };
+
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  // React 19 类型下，需要显式声明这俩字段，否则 this.state / this.props 推断为 unknown
+  declare state: ErrorBoundaryState;
+  declare props: ErrorBoundaryProps;
+
+  constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
   }
@@ -31,7 +38,7 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
       );
     }
 
-    return this.props.children; 
+    return this.props.children;
   }
 }
 

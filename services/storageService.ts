@@ -657,10 +657,17 @@ class StorageService {
             connectionCount: input.connections?.length || 0,
             thumbnail: input.thumbnail || existing?.thumbnail,
         };
+        // 持久化前剥离 transient 状态：isLoading 是"正在生成"的临时标记，
+        // 若自动保存命中生成中途，回头加载会让节点永久卡在 loading
+        const sanitizedNodes = (input.nodes || []).map(n => {
+            if (!n.isLoading) return n;
+            const { isLoading, ...rest } = n;
+            return rest;
+        });
         const data: WorkspaceData = {
             id: input.id,
             projectName: input.projectName,
-            nodes: input.nodes || [],
+            nodes: sanitizedNodes,
             connections: input.connections || [],
             transform: input.transform || { x: 0, y: 0, k: 1 },
         };
@@ -695,6 +702,27 @@ class StorageService {
 
     // ================== 素材库 ==================
 
+    async findAssetBySrc(src: string): Promise<AssetEntry | null> {
+        if (!src) return null;
+        try {
+            const store = await this.getStore(STORE_ASSETS, 'readonly');
+            // 用 cursor 命中即停，避免 getAll 把整个素材库（含 base64 大 src）拉进内存
+            return new Promise((resolve) => {
+                const req = store.openCursor();
+                req.onerror = () => resolve(null);
+                req.onsuccess = () => {
+                    const cursor = req.result;
+                    if (!cursor) { resolve(null); return; }
+                    const entry = cursor.value as AssetEntry;
+                    if (entry.src === src) { resolve(entry); return; }
+                    cursor.continue();
+                };
+            });
+        } catch (e) {
+            return null;
+        }
+    }
+
     async addAsset(input: Omit<AssetEntry, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): Promise<AssetEntry> {
         const entry: AssetEntry = {
             id: input.id || `asset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -707,18 +735,40 @@ class StorageService {
             width: input.width,
             height: input.height,
         };
+        // 没有显式 id 时按 src 去重；check 和 insert 放在同一 readwrite 事务里，
+        // 避免两次并发调用都通过去重检查、各自插入导致重复
         try {
             const store = await this.getStore(STORE_ASSETS, 'readwrite');
-            await new Promise<void>((resolve, reject) => {
-                const req = store.put(entry);
-                req.onsuccess = () => resolve();
-                req.onerror = () => reject(req.error);
+            return await new Promise<AssetEntry>((resolve, reject) => {
+                if (input.id) {
+                    const putReq = store.put(entry);
+                    putReq.onsuccess = () => resolve(entry);
+                    putReq.onerror = () => reject(putReq.error);
+                    return;
+                }
+                const scanReq = store.openCursor();
+                scanReq.onerror = () => reject(scanReq.error);
+                scanReq.onsuccess = () => {
+                    const cursor = scanReq.result;
+                    if (cursor) {
+                        const existing = cursor.value as AssetEntry;
+                        if (existing.src === input.src) {
+                            resolve(existing);
+                            return;
+                        }
+                        cursor.continue();
+                        return;
+                    }
+                    // 未找到重复，插入新条目（同事务内）
+                    const putReq = store.put(entry);
+                    putReq.onsuccess = () => resolve(entry);
+                    putReq.onerror = () => reject(putReq.error);
+                };
             });
         } catch (e) {
             console.error('Failed to add asset:', e);
             throw e;
         }
-        return entry;
     }
 
     async listAssets(): Promise<AssetEntry[]> {

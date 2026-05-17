@@ -276,7 +276,7 @@ export const StorageModal: React.FC<StorageModalProps> = ({ isOpen, onClose, isD
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-3">
-                                    <span className={`text-xs font-mono ${textSub}`}>{formatBytes(size)}</span>
+                                    <span className={`text-xs font-mono ${textSub}`}>{formatBytes(size as number)}</span>
                                     <button
                                         onClick={() => handleClearCache(type)}
                                         disabled={isClearing}

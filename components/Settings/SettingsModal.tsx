@@ -450,7 +450,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, i
     // 组件卸载时清理所有 pending 自动拉取定时器
     useEffect(() => {
         return () => {
-            Object.values(autoFetchTimersRef.current).forEach(t => window.clearTimeout(t));
+            Object.values(autoFetchTimersRef.current).forEach(t => window.clearTimeout(t as number));
             autoFetchTimersRef.current = {};
         };
     }, []);

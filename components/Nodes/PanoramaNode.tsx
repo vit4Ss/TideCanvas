@@ -19,7 +19,11 @@ let threeModulePromise: Promise<any> | null = null;
 
 const loadThree = () => {
   if (!threeModulePromise) {
-    threeModulePromise = import(/* @vite-ignore */ THREE_MODULE_URL);
+    threeModulePromise = import(/* @vite-ignore */ THREE_MODULE_URL).catch(err => {
+      // 失败时清缓存：否则首次离线/CDN 抖动后，所有后续全景节点都会拿到这个 rejected promise
+      threeModulePromise = null;
+      throw err;
+    });
   }
   return threeModulePromise;
 };
@@ -44,10 +48,13 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
 
   useEffect(() => {
     const mount = mountRef.current;
-    if (!mount || !textureSrc) {
-      setHasError(!textureSrc);
+    if (!textureSrc) {
+      setIsReady(false);
+      // 生成中时不展示「加载失败」，统一交由下方 UI 用 data.isLoading 显示生成中提示
+      setHasError(!data.isLoading);
       return;
     }
+    if (!mount) return;
 
     let cancelled = false;
     let cleanupScene: (() => void) | null = null;
@@ -199,25 +206,22 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
       cancelled = true;
       cleanupScene?.();
     };
-  }, [textureSrc]);
+  }, [textureSrc, data.isLoading]);
 
   const containerBg = isDark ? 'bg-[#0f1115]' : 'bg-white';
   const containerBorder = selected
     ? (isDark ? 'border-zinc-500 ring-1 ring-zinc-600/40' : 'border-gray-300 ring-1 ring-gray-200/60')
     : (isDark ? 'border-zinc-700/50' : 'border-gray-200');
-  const chipBtn = isDark
-    ? 'bg-zinc-800/80 hover:bg-zinc-700 border-zinc-700 text-zinc-200'
-    : 'bg-white hover:bg-gray-50 border-gray-200 text-gray-700 shadow-sm';
   const ghostIconBtn = isDark
-    ? 'text-zinc-400 hover:text-white hover:bg-white/10 hover:shadow-md hover:shadow-black/20'
-    : 'text-gray-500 hover:text-gray-900 hover:bg-white hover:shadow-md hover:shadow-gray-200/70';
+    ? 'text-zinc-400 hover:text-white hover:bg-white/10'
+    : 'text-gray-500 hover:text-gray-900 hover:bg-black/[0.05]';
   const titleColor = isDark ? 'text-zinc-200' : 'text-gray-700';
 
   return (
     <>
       {isSelectedAndStable && showControls && (
         <div
-          className={`absolute left-1/2 z-[60] flex items-center gap-1 rounded-2xl border px-1.5 py-1 shadow-xl pointer-events-auto whitespace-nowrap ${chipBtn}`}
+          className="surface-chip absolute left-1/2 z-[60] flex items-center gap-0.5 rounded-2xl px-1.5 py-1 pointer-events-auto whitespace-nowrap animate-in fade-in zoom-in-95 duration-200 ease-organic"
           style={{ top: -48 * titleScale, transform: `translateX(-50%) scale(${titleScale})`, transformOrigin: 'bottom center' }}
           onMouseDown={(e) => e.stopPropagation()}
         >
@@ -225,7 +229,7 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
             type="button"
             title="下载"
             onClick={(e) => { e.stopPropagation(); onDownload?.(data.id); }}
-            className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-all ${ghostIconBtn}`}
+            className={`press inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-150 ${ghostIconBtn}`}
           >
             <Icons.Download size={15} />
           </button>
@@ -233,7 +237,7 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
             type="button"
             title="最大化"
             onClick={(e) => { e.stopPropagation(); onMaximize?.(data.id); }}
-            className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-all ${ghostIconBtn}`}
+            className={`press inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors duration-150 ${ghostIconBtn}`}
           >
             <Icons.Maximize2 size={15} />
           </button>
@@ -242,12 +246,12 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
 
       {isSelectedAndStable && (
         <div
-          className={`absolute left-0 z-[60] pointer-events-auto flex h-7 items-center gap-1.5 rounded-lg px-2 transition-all ${isDark ? 'bg-zinc-900/70 border border-zinc-800/80' : 'bg-white/85 border border-gray-200 shadow-sm'}`}
+          className="surface-chip absolute left-0 z-[60] pointer-events-auto flex h-7 items-center gap-1.5 rounded-lg px-2 animate-in fade-in slide-in-from-bottom-1 duration-200 ease-organic"
           style={{ top: -34 * titleScale, transform: `scale(${titleScale})`, transformOrigin: 'bottom left' }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <Icons.Globe size={13} className={isDark ? 'text-sky-300' : 'text-sky-600'} />
-          <span className={`max-w-[220px] truncate text-sm font-medium ${titleColor}`}>{data.title}</span>
+          <span className={`max-w-[220px] truncate text-sm font-medium tracking-tight ${titleColor}`}>{data.title}</span>
         </div>
       )}
 
@@ -258,9 +262,15 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
         }}
       >
         <div ref={mountRef} className="absolute inset-0" />
-        {(!isReady || hasError) && (
+        {(!isReady || hasError || data.isLoading) && (
           <div className={`absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 ${isDark ? 'text-zinc-400 bg-[#0f1115]' : 'text-gray-500 bg-white'}`}>
-            {hasError ? (
+            {data.isLoading ? (
+              <>
+                <Icons.Loader2 size={28} className={`animate-spin ${isDark ? 'text-sky-300' : 'text-sky-600'}`} />
+                <span className="text-sm font-medium">生成全景中…</span>
+                <span className="text-[11px] opacity-70">请耐心等待，全景图生成耗时较长</span>
+              </>
+            ) : hasError ? (
               <>
                 <Icons.AlertTriangle size={28} className={isDark ? 'text-amber-300' : 'text-amber-600'} />
                 <span className="text-sm font-medium">全景加载失败</span>
@@ -273,8 +283,8 @@ export const PanoramaNode: React.FC<PanoramaNodeProps> = ({
             )}
           </div>
         )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-20 bg-gradient-to-t from-black/40 to-transparent" />
-        <div className="pointer-events-none absolute left-3 bottom-3 z-20 flex items-center gap-2 rounded-full bg-black/45 px-3 py-1.5 text-xs font-medium text-white/85 backdrop-blur-md">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-24 bg-gradient-to-t from-black/45 via-black/15 to-transparent" />
+        <div className="pointer-events-none absolute left-3 bottom-3 z-20 flex items-center gap-2 rounded-full bg-black/55 px-3 py-1.5 text-xs font-medium text-white/90 backdrop-blur-md ring-1 ring-inset ring-white/10 shadow-sm">
           <Icons.MousePointer2 size={13} />
           <span>拖动查看 360°</span>
         </div>
